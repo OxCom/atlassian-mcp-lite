@@ -32,10 +32,6 @@ const (
 	// exhaustion primitive.
 	maxResponseBody = 8 << 20 // 8 MiB
 
-	// userAgent identifies this client in Atlassian's logs, which is what makes
-	// a misbehaving integration attributable.
-	userAgent = "atlassian-mcp-lite/" + Version
-
 	// Transport tuning. Only one host is ever contacted, so the idle pool is
 	// small on purpose; the timeouts exist so a stalled TLS handshake or a
 	// half-open connection cannot consume the whole request budget.
@@ -48,7 +44,17 @@ const (
 )
 
 // Version is reported in the User-Agent and to MCP clients during initialize.
-const Version = "0.1.0"
+//
+// A var rather than a const so a release build can stamp the real tag with
+// -ldflags "-X github.com/OxCom/atlassian-mcp-lite/internal/core.Version=v1.2.3".
+// The linker silently ignores an -X naming a symbol it cannot set, so a const
+// here meant every release binary reported this default and nobody was told.
+var Version = "0.1.0"
+
+// userAgent identifies this client in Atlassian's logs, which is what makes a
+// misbehaving integration attributable. A var for the same reason as Version,
+// which it is built from.
+var userAgent = "atlassian-mcp-lite/" + Version
 
 // APIError is a response outside 2xx, carrying the upstream message because
 // Atlassian's own error text is the useful half of a failure.

@@ -176,11 +176,18 @@ func writeBlock(b *strings.Builder, n ast.Node, src []byte, listPrefix string) {
 		// an HTMLBlock has no inline children, so recursing would lose the
 		// whole block. Lines() excludes the closing tag, which lives in
 		// ClosureLine, so that has to be written separately.
-		b.WriteString(rawLines(node, src))
+		//
+		// Escaped like any other text. An HTML block is content, not markup
+		// this converter produced, and passing it through raw was a hole
+		// straight past the escaper: "<div>{code}</div>" opened a live macro.
+		// Angle brackets mean nothing to wiki, so ordinary HTML is unchanged.
+		var html strings.Builder
+		html.WriteString(rawLines(node, src))
 		if node.HasClosure() {
 			closure := node.ClosureLine
-			b.Write(closure.Value(src))
+			html.Write(closure.Value(src))
 		}
+		b.WriteString(escapeWiki(html.String()))
 
 	default:
 		// Unknown block: emit its text so nothing is lost, and its raw lines

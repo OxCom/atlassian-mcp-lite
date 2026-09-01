@@ -733,3 +733,210 @@ check was cheapest to skip and would have been most expensive to get wrong.
 Result: 65 tests in `internal/confluence`, 92.9% statement coverage, and `make check` green end to
 end — `golangci-lint` 0 issues, `gosec` 0 issues over 4687 lines, gitleaks, trufflehog and
 `govulncheck` clean, `go mod tidy -diff` clean.
+
+## Task 11: jira_comment and jira_transition
+
+Files: `internal/jira/{write.go,write_test.go,module.go,read.go,update.go}`, plus one fix in
+`internal/markup/to_wiki.go`. Reviewed by fable (completeness), haiku (consistency) and codex via a
+relay agent (correctness). haiku found nothing; the other two converged on the same defect from
+opposite directions.
+
+With these two tools all ten exist.
+
+### The resolver picked the wrong transition, and a transition is not undoable
+
+`jira_transition` accepts an id, a transition name, or a target status name. The landed code tried
+them as ranked tiers, most specific first — which reads as obviously right and is wrong.
+
+Both reviewers proved it with the same shape of workflow, independently:
+
+- fable: transitions `{1 "Dup"→A, 2 "Dup"→B, 3 "Go"→Dup}` with `status: "Dup"`. The name tier
+  matched **ambiguously**, so the switch fell through to the target tier and silently executed
+  transition 3 — a path the caller never named.
+- codex's relay agent: id 11 named "Done" targeting **Closed**, id 22 named "Resolve" targeting
+  **Done**. Asking for `status: "Done"` moved the issue to Closed. No error, no warning.
+
+The second is the one that matters. The parameter is called `status`, SPEC frames the lookup as
+"status name → transition id", and the tool answered by firing a transition into a different status
+— triggering whatever automation and notifications that workflow carries, irreversibly.
+
+**Fixed** by abandoning ranked tiers: every category is collected, matches are deduplicated by
+transition, and the move happens only when the whole set names exactly one. Anything else is an
+ambiguity the caller settles with an id, and the error lists every candidate as `name -> target
+(id N)`. Five tests now cover it, including both reviewers' workflows.
+
+codex rated this blocking; the relay agent downgraded it to important and was right — the code
+compiles, runs, and violates no stated constraint, because SPEC never specifies resolution rules.
+Notably it also refused to treat "each accepted only when unique" as evidence, because that phrasing
+came from **my review prompt**, not the spec. That is the premises rule working in the direction it
+was written for.
+
+### Test quality, and where the weak test came from
+
+| # | Finding | Engine | Disposition |
+|---|---|---|---|
+| T1 | `TestTransitionResolvesStatusNameToID` gave every transition the same name as its target status, so it passed whether resolution worked by name, by target, or by only one of them — and could never surface the collision above. | codex | **Fixed.** The fixture now keeps names and targets distinct, and the relay agent's extra observation is addressed too: *every* fixture in the file had that flaw, so resolution by target status alone was untested anywhere. It has its own test now. Worth recording that this fixture is **copied verbatim from the plan** — the implementer followed instructions, and the defect is the plan's. |
+| T2 | The transition case in the upstream-error test returned 403 for the initial GET, so the POST was never reached and the test would pass against a handler that swallowed its write error. | codex | **Fixed** the same way the identical flaw was fixed in Task 13: the lookup succeeds, only the write 403s, and the test asserts the write was actually attempted. Two rounds, two packages, same mistake — a fake that fails everything tests less than it appears to. |
+
+### Adjudicated, no change
+
+- **`authorizeWrite` duplicates the allowlist logic still inlined in `handleUpdate`.** Real, and it is
+  a security check, so drift is the risk. But folding it here would mean rewriting `update.go`, which
+  is outside this task's file list, and `handleUpdate` additionally needs the verified project back
+  for its version lookup. Recorded as a follow-up: change `authorizeWrite` to return
+  `(project string, err error)` and have `handleUpdate` consume it.
+- **The "renders to nothing" guard on the comment body is unreachable.** fable probed every plausible
+  candidate — link reference definitions, HTML comments, footnotes, bare entities, a lone backslash —
+  and `markup.ToWiki` returns `""` only for whitespace-only input, which `TrimSpace` already rejects.
+  Kept as a one-line defence against future converter changes; its comment was corrected, since it
+  claimed HTML comments render to nothing and they do not.
+- **Byte bound on the comment body versus Jira's 32,767-character limit.** fable ruled bytes correct
+  here, and the reasoning is better than the convention: markdown→wiki conversion changes length, so
+  no local check can mirror the real limit anyway. The bound exists to keep an unbounded payload off
+  the wire, Jira's own 400 handles the rest, and `BoundRunes` stays for values sent unconverted.
+
+### A finding for a different task, fixed anyway
+
+fable noticed, while probing comment bodies, that `internal/markup/to_wiki.go` emitted HTML blocks as
+**raw unescaped source** — so a comment body containing `<div>{code}...{code}</div>` posted a live
+macro, straight past the escaper that Task 7's review installed as the converter's injection
+boundary. Confirmed: `<div>{code}malicious{code}</div>` came out byte-identical.
+
+Fixed in `to_wiki.go`: an HTML block is content, not markup this converter produced, so it goes
+through `escapeWiki` like any other text. Angle brackets mean nothing to wiki, so ordinary HTML is
+untouched — the existing pass-through tests still assert byte-identical output. Inline raw HTML was
+already safe, because the text between tags is a Text node and was already escaped.
+
+Result: 86 tests in `internal/jira`, `golangci-lint` 0 issues.
+
+## Task 14: packaging and documentation
+
+Files: `Dockerfile`, `compose.yaml`, `.dockerignore`, `README.md`, `CLAUDE.md`,
+`compose.override.yaml.example`, and `cmd/atlassian-mcp-lite/main.go` (landed separately, see below).
+Reviewed by fable (completeness and accuracy) and haiku (toolchain consistency), with codex's
+correctness pass running against the corrected files.
+
+### main.go, and a lint rule that was right
+
+`main.go` was deferred out of Task 6 and again out of Task 13, so that the two product packages could
+be built in parallel without a `cmd/` that imported both. It landed here, unchanged in substance from
+the version parked in the plan — and `golangci-lint` immediately caught something the plan's code had
+carried all along: `os.Exit` after `defer stop()`, so the signal handler is never released.
+
+Harmless in a process that is exiting, but it is a lie in the shape of correct code, and the fix is
+the standard one: `main` now does nothing but turn an error into an exit status, and everything else
+lives in `run() error` where defers actually run. The two failure paths were then verified in the
+real container: no configuration gives `configuration: ATLAS_BASE_URL is required`, and valid
+credentials with no capability give `no tools enabled: set at least one of ATLAS_<DOMAIN>_...`.
+
+### The corporate CA shipped in the production image
+
+**The finding of this round, and I raised it as a lead before dispatching** — the Dockerfile appended
+the corporate CA to `/etc/ssl/certs/ca-certificates.crt` in the build stage, and the final stage
+copied that same file. fable confirmed it empirically rather than by reading: it built with the
+secret and found the runtime bundle had grown from 150 to 151 certificates, matching the Crytek CA by
+SHA-256 fingerprint.
+
+So a container built on the office network trusted a TLS-interception CA for its Atlassian
+connection — and the Dockerfile's own comment claimed the opposite, that neither the CA nor the token
+"is written into a layer".
+
+**Fixed** by never mutating the system bundle: the CA is concatenated with the build image's roots
+into `/tmp/bundle.crt`, named through `SSL_CERT_FILE`, and deleted inside the same `RUN`; the runtime
+roots are copied from a pristine `golang:1.27-trixie` rather than from the build stage, so no future
+edit to the build can reach them either. Verified after the fix: exactly 150 certificates, corp CA
+absent by fingerprint.
+
+fable also surfaced the reason this was intermittent — **BuildKit does not key its layer cache on
+secret contents**, so whether the CA landed in an image depended on which cached `go mod download`
+layer was reused. That is also why `make image` appeared to work earlier and then failed once the
+Dockerfile changed: the successful builds had been served from cache. The real cause was a
+machine-local `compose.override.yaml` predating the production service, so no CA secret was passed at
+all. The tracked template already had the block; the local copy did not.
+
+### The documented build command did not work
+
+fable found that `docker compose build` — the command the README gave — **fails outright** on any
+machine with a `compose.override.yaml`, because Compose auto-loads that file for the default
+`compose.yaml` and it names dev-only services. Worse, the README stated the caveat backwards: it
+claimed a hand invocation without `-f` silently skips proxy settings, when in fact without `-f` the
+override auto-loads and errors, and it is the explicit `-f compose.yaml` that skips it.
+
+Fixed: `make image` is now the documented command, and the caveat is stated in both directions. The
+same inverted claim in `compose.override.yaml.example` was corrected too, along with a trap that cost
+real time here — Compose fails the *entire* project when a secret names a file that does not exist,
+so a machine without `~/.netrc` must delete that secret rather than leave it declared.
+
+### The gap that could not be closed
+
+Every remaining blocking finding from both reviewers traces to one missing file: **`.env.example`
+cannot be written**, because a permission rule denies `.env*`. It is not a code problem and I did not
+route around it — writing the content under another name and renaming it would defeat a control the
+user put there deliberately.
+
+What was done instead: the README's Running section now inlines a minimal environment file rather
+than telling the reader to copy a template, and it says explicitly that at least one capability must
+be enabled — without which the server exits 1, which the previous three-variable instruction would
+have produced. `compose.yaml`'s comment no longer names the file. Still outstanding, and recorded in
+`CLAUDE.md` so a later session does not assume the packaging is complete: the file itself, and
+`internal/core/env_example_test.go`, the test that guards it against drifting from what `Load` reads.
+
+### Documentation accuracy
+
+fable checked the README's environment table against `internal/core/config.go` variable by variable
+and found it exact — all ten fixed variables, the six derived capability flags, every default, every
+validation rule. The tool table was verified against a live `tools/list` on the built image with all
+capabilities enabled, and each action class matched its `Actions` declaration. A full MCP handshake
+was confirmed under the README's own hardened `docker run` invocation.
+
+Three claims were wrong and are fixed: `CLAUDE.md` said `.env.example` had landed, said the
+dependency budget was three modules when SPEC and `go.mod` name four, and the README omitted that
+allowlist matching is case-insensitive and that a `~` prefix is permitted.
+
+Result: image builds at 9.6 MiB, `make check` green — `golangci-lint` 0 issues, `gosec` 0 issues over
+4997 lines, gitleaks, trufflehog and `govulncheck` clean, coverage core 96.4%, confluence 92.9%,
+jira 92.3%, markup 92.7%.
+
+### Task 14, codex pass: a release job nobody had ever run
+
+The correctness pass went last, against the already-corrected files, and found the one defect the
+other two could not: **the release job cannot push its image.** `ghcr.io/${{ github.repository }}`
+yields `ghcr.io/OxCom/atlassian-mcp-lite`, and a Docker repository component must be lowercase, so
+the reference is rejected before anything is pushed. Fixed with `${GITHUB_REPOSITORY,,}`. This is a
+tag-gated job that has never executed — exactly the code a review is for.
+
+It also found that **`-X main.version` set nothing**. Package `main` has no such symbol; the version
+lives in `internal/core`, and it was a `const`, which the linker cannot set either. The linker
+ignores an unmatched `-X` in silence, so every release binary would have reported `0.1.0` forever.
+`Version` is now a `var`, the flag names its real import path, and the Dockerfile takes a `VERSION`
+build arg that the release job passes — verified by building with `-X …Version=v9.9.9` and finding
+the string in the binary.
+
+Two smaller things it caught, both leftovers from fixing the earlier findings: `compose.yaml`'s own
+header still advertised the `docker compose build` command the README had just been corrected away
+from, and both README and `CLAUDE.md` claimed the Dockerfile guards *both* secrets with `if [ -s ... ]`
+when only the CA is processed at all. Fixed.
+
+**Two false blockers, and how they were caught.** Codex reported that `/out` and `dist/` are never
+created, so `go build -o` into them fails. The relay agent tested it — `go build -o` does create the
+parent directory — and discarded both. That is the premises rule doing its job in the direction it
+was written for: a confident claim about tool behaviour, refuted by running the tool.
+
+**Recorded, not fixed.** Codex wants `golang:1.27-trixie` pinned by digest and every GitHub Action
+pinned to a commit SHA. Both are right for a project that publishes releases, and neither is a
+one-line change: digests need re-pinning on every base image update, and action SHAs cannot be looked
+up from this environment. What was fixed is the half that costs nothing — the base image is now a
+named `base` stage resolved once, so the toolchain and the runtime trust roots can no longer come
+from two different images in a single build. Also recorded: the release publishes only linux/amd64
+though the matrix cross-compiles arm64, so the container and the binaries disagree about which
+platforms are supported.
+
+The relay agent additionally answered two lens items codex skipped silently: the scratch image needs
+no `/tmp`, tzdata or `/etc/passwd` (no code path calls `os.CreateTemp`, `time.LoadLocation`,
+`user.Current` or `os.UserHomeDir`), so `read_only: true` holds; and the README's account of what
+happens with no capability enabled matches `main.go`. Reporting "I checked this and it is fine" is
+worth as much as a finding, and codex's silence there was indistinguishable from not having looked.
+
+Final state: image 10.1 MB, runtime trust store exactly the 150 pristine roots, `make check` green —
+`golangci-lint` 0 issues, `gosec` 0 issues over 5003 lines, gitleaks, trufflehog and `govulncheck`
+clean.

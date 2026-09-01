@@ -40,7 +40,7 @@ func (m module) updateDecl() core.ToolDecl {
 			// through map[string]any, so a JSON number would lose precision
 			// above 2^53 and silently change the id it names.
 			props := map[string]*jsonschema.Schema{
-				fieldKey: {Type: typeString, Description: "Issue key, e.g. PROJ-123."},
+				fieldKey: {Type: typeString, Description: descIssueKey},
 			}
 			// Additive, reversible fields.
 			if c.Write {

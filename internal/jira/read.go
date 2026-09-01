@@ -21,7 +21,7 @@ import (
 // projects store the link in a site-specific custom field — so every field list
 // is translated before the request and translated back in the response.
 var searchDefaults = []string{
-	"summary", "status", "issuetype", "assignee", "fixVersions", "parent", "epic", "updated",
+	"summary", fieldStatus, "issuetype", "assignee", "fixVersions", "parent", "epic", "updated",
 }
 
 // logicalEpic is the name callers use for the Epic Link field.
@@ -170,7 +170,7 @@ func (m module) getDecl() core.ToolDecl {
 		Description: "Get one Jira issue. The description is returned as markdown.",
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
-				fieldKey:    {Type: typeString, Description: "Issue key, e.g. PROJ-123."},
+				fieldKey:    {Type: typeString, Description: descIssueKey},
 				fieldsParam: fieldsProperty(),
 			}, []string{fieldKey})
 		},
@@ -266,7 +266,7 @@ func (m module) flatten(key string, fields map[string]json.RawMessage) map[strin
 			}
 		case "parent":
 			v, ok = parentValue(raw)
-		case "status", "issuetype", "priority", "resolution":
+		case fieldStatus, "issuetype", "priority", "resolution":
 			v, ok = namedValue(raw)
 		case "assignee", "reporter", "creator":
 			v, ok = personValue(raw)

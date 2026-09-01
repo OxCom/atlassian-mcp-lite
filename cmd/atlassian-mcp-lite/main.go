@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,8 +14,23 @@ import (
 	"github.com/OxCom/atlassian-mcp-lite/internal/jira"
 )
 
+// main does nothing but translate an error into an exit status. Everything else
+// lives in run, so that deferred work — releasing the signal handler — actually
+// happens: os.Exit does not run deferred functions, and a defer sitting above
+// one is a lie the compiler will not catch.
 func main() {
-	// Logs go to stderr: stdout carries the MCP protocol stream.
+	if err := run(); err != nil {
+		// Logs go to stderr: stdout carries the MCP protocol stream. This one
+		// is written directly because a failure here can predate the logger.
+		fmt.Fprintf(os.Stderr, "atlassian-mcp-lite: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	// A boot logger exists before configuration does, so a configuration error
+	// has somewhere to go. It holds no secrets because none are known yet — and
+	// core.Load's errors never quote a credential.
 	bootLog := core.NewLogger(os.Getenv("ATLAS_LOG"), os.Stderr)
 
 	reg := &core.Registry{}
@@ -25,9 +41,9 @@ func main() {
 
 	cfg, err := core.Load(os.Getenv, reg.Domains())
 	if err != nil {
-		bootLog.Errorf("configuration: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("configuration: %w", err)
 	}
+	bootLog.Debugf("configuration loaded for %v", reg.Domains())
 
 	// Both the raw token and the Base64 Basic credential are given to the
 	// logger, per core.BasicCredential's contract: an upstream error body can
@@ -38,18 +54,18 @@ func main() {
 	log := core.NewLogger(cfg.LogLevel, os.Stderr, cfg.Token, core.BasicCredential(cfg.Email, cfg.Token))
 	client := core.NewClient(cfg, log)
 
+	// Second pass: the same modules, now wired to a client. The first pass
+	// existed only to learn the domain names that Load needed.
 	reg = &core.Registry{}
 	reg.Register(jira.NewWith(cfg, client))
 	reg.Register(confluence.NewWith(cfg, client))
 
 	srv, n, err := core.NewServer(cfg, reg, log)
 	if err != nil {
-		log.Errorf("build server: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("build server: %w", err)
 	}
 	if n == 0 {
-		log.Errorf("no tools enabled: check ATLAS_<DOMAIN>_{READ,WRITE,DESTRUCTIVE}")
-		os.Exit(1)
+		return errors.New("no tools enabled: set at least one of ATLAS_<DOMAIN>_{READ,WRITE,DESTRUCTIVE}")
 	}
 	log.Debugf("serving %d tools over stdio", n)
 
@@ -58,8 +74,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// A cancelled context is how a clean shutdown arrives, not a failure.
 	if err := core.Serve(ctx, srv); err != nil && !errors.Is(err, context.Canceled) {
-		log.Errorf("serve: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("serve: %w", err)
 	}
+	return nil
 }

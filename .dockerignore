@@ -1,0 +1,55 @@
+# The build needs the Go module files and the source tree, nothing else.
+# Everything excluded here is either irrelevant to `go build`, or must never
+# enter a build context in the first place.
+
+# --- must never be sent to the daemon ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+.netrc
+certs/
+compose.override.yaml
+compose.override.yml
+
+# --- version control and knowledge-base symlinks ---
+# .git is excluded, so the Dockerfile sets GOFLAGS=-buildvcs=false.
+.git
+.gitignore
+.gitleaksignore
+.github
+.serena
+graphify-out
+docs
+
+# --- build output and local state ---
+bin/
+dist/
+coverage.out
+coverage.html
+*.test
+*.out
+*.prof
+*.pprof
+
+# --- editor and OS noise ---
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# --- not used by the image build ---
+Makefile
+compose.yaml
+compose.dev.yaml
+compose.override.yaml.example
+.golangci.yml
+.graphifyignore
+README.md
+CLAUDE.md
+AGENTS.md
+LICENSE

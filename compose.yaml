@@ -1,0 +1,52 @@
+# Production image. Compose is used here for building and for a quick manual
+# smoke test; an MCP client launches the container itself with `docker run -i`,
+# because the client must own this process's stdin and stdout.
+#
+#   make image                      # the build command to use
+#
+# Use `make image`, not a bare `docker compose build`. Compose auto-loads
+# compose.override.yaml for the default compose.yaml, and that override names
+# dev-only services this file does not define, so a bare build fails outright
+# once the override exists. The Makefile passes -f for each file, which both
+# suppresses the auto-load and adds the override deliberately.
+#
+# Deliberately no top-level `name:`. compose.dev.yaml sets its own project name
+# and the Makefile passes both files; a name here would only fight with it.
+
+services:
+  atlassian-mcp-lite:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Defaults are public. compose.override.yaml overrides these and adds the
+      # `secrets:` list on a corporate network; nothing here needs to change.
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        GOSUMDB: ${GOSUMDB:-sum.golang.org}
+    image: atlassian-mcp-lite:local
+
+    # stdio transport: the MCP client owns this process's stdin and stdout.
+    stdin_open: true
+    tty: false
+
+    # Configuration is environment only. Point ATLAS_ENV_FILE at your private
+    # env file — the README's Running section has a minimal one to start from.
+    # `required: false` keeps `docker compose build` and `make image` working on
+    # a machine that has not created one yet.
+    env_file:
+      - path: ${ATLAS_ENV_FILE:-./.env}
+        required: false
+
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # No volumes. This server never reads a local file, and no tool accepts a
+    # filesystem path, so there is nothing to mount.
+    #
+    # Egress is NOT restricted here. read_only, cap_drop and no-new-privileges
+    # constrain the filesystem and privileges, not network destinations. SSRF is
+    # prevented instead by the base URL being a validated configuration
+    # constant that tool input cannot influence. Operators wanting outbound
+    # filtering must add a proxy network or host firewall rules themselves.

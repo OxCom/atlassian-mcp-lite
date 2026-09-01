@@ -4,13 +4,9 @@
 package jira
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
-
-	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/OxCom/atlassian-mcp-lite/internal/core"
 )
@@ -27,6 +23,12 @@ const (
 	// fieldKey is the issue-key property name, in schemas, request bodies and
 	// results alike.
 	fieldKey = "key"
+	// fieldStatus is the status property name, in schemas, flattened results
+	// and transition results alike.
+	fieldStatus = "status"
+	// descIssueKey is the one description every issue-key property carries, so
+	// the wording cannot drift between tools.
+	descIssueKey = "Issue key, e.g. PROJ-123."
 	// typeString is the JSON Schema type every Atlassian identifier uses. None
 	// is ever declared as a number: the SDK re-marshals arguments through
 	// map[string]any, so a number loses precision above 2^53.
@@ -102,18 +104,4 @@ func projectOf(key string) string {
 		return ""
 	}
 	return key[:i]
-}
-
-// clampLimit applies the configured default and hard cap.
-// Temporary stubs so the package compiles before Task 11. Delete each as its
-// real implementation lands.
-func (m module) transitionDecl() core.ToolDecl {
-	return core.ToolDecl{Name: "jira_transition", Actions: []core.Action{core.ActionDestructive}, Description: "stub",
-		Schema: func(core.Caps) *jsonschema.Schema { return core.ObjectSchema(nil, nil) },
-		Handle: func(context.Context, json.RawMessage) (any, error) { return nil, fmt.Errorf("not implemented") }}
-}
-func (m module) commentDecl() core.ToolDecl {
-	return core.ToolDecl{Name: "jira_comment", Actions: []core.Action{core.ActionWrite}, Description: "stub",
-		Schema: func(core.Caps) *jsonschema.Schema { return core.ObjectSchema(nil, nil) },
-		Handle: func(context.Context, json.RawMessage) (any, error) { return nil, fmt.Errorf("not implemented") }}
 }

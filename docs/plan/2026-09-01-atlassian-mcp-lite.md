@@ -525,7 +525,7 @@ git commit -m "feat(core): configuration with derived domain capabilities and wr
 - Consumes: `core.Config.LogLevel` from Task 1.
 - Produces: `core.Logger` with `Debugf(format string, args ...any)`, `Errorf(format string, args ...any)`, `Enabled(level string) bool`. Constructor `core.NewLogger(level string, w io.Writer) *Logger`. `core.Mask(s string) string`, `core.MaskHeaders(h http.Header) map[string]string`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 package core
@@ -634,12 +634,12 @@ func TestLoggerDebugEmitsBoth(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/core/ -run 'TestMask|TestLogger' -v`
 Expected: FAIL — `undefined: Mask`, `undefined: NewLogger`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 package core
@@ -762,12 +762,12 @@ func (l *Logger) emit(level, format string, args ...any) {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/core/ -v`
 Expected: PASS — Task 1 and Task 2 tests.
 
-- [ ] **Step 5: Three-engine review gate**
+- [x] **Step 5: Three-engine review gate**
 
 Do not commit yet. Dispatch three independent reviews of *this task's diff only*, in parallel, one
 per engine. Each gets the same diff and the task's own "Interfaces" block, and a different lens.
@@ -833,7 +833,7 @@ git commit -m "feat(core): stderr logger with unconditional credential masking"
 
 The `path` argument is always a server-controlled constant with url-escaped segments interpolated by the caller. The base URL comes from config and is never taken from tool input — this is what makes SSRF unreachable without a DNS-pinning adapter.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 package core
@@ -1067,12 +1067,12 @@ func errorsAs(err error, target **APIError) bool {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/core/ -run 'TestDo|TestError|TestToken' -v`
 Expected: FAIL — `undefined: NewClient`, `undefined: APIError`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 package core
@@ -1263,12 +1263,12 @@ func upstreamMessage(raw []byte) string {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/core/ -v`
 Expected: PASS — all tests from Tasks 1–3.
 
-- [ ] **Step 5: Three-engine review gate**
+- [x] **Step 5: Three-engine review gate**
 
 Do not commit yet. Dispatch three independent reviews of *this task's diff only*, in parallel, one
 per engine. Each gets the same diff and the task's own "Interfaces" block, and a different lens.
@@ -1332,7 +1332,7 @@ git commit -m "feat(core): HTTP client with fixed base URL, upstream error text,
 - Consumes: nothing.
 - Produces: `core.ResolveFields(defaults []string, requested []string) ([]string, error)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 package core
@@ -1425,12 +1425,12 @@ func TestResolveFieldsIgnoresDuplicatesAndBlanks(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/core/ -run TestResolveFields -v`
 Expected: FAIL — `undefined: ResolveFields`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 package core
@@ -1521,12 +1521,12 @@ func dedupe(in []string) []string {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/core/ -v`
 Expected: PASS.
 
-- [ ] **Step 5: Three-engine review gate**
+- [x] **Step 5: Three-engine review gate**
 
 Do not commit yet. Dispatch three independent reviews of *this task's diff only*, in parallel, one
 per engine. Each gets the same diff and the task's own "Interfaces" block, and a different lens.
@@ -4691,7 +4691,7 @@ git commit -m "feat(jira): jira_update with capability-built schema and name-to-
 
 `jira_transition` is `ActionDestructive` because a workflow move is not trivially reversible: transitions can be one-way and can fire side effects such as notifications and automation rules.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 package jira
@@ -4817,12 +4817,12 @@ func TestTransitionAcceptsNumericIDDirectly(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/jira/ -run 'Comment|Transition' -v`
 Expected: FAIL — the stubs return "not implemented".
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Delete the `transitionDecl` and `commentDecl` stubs from `module.go`, then create `internal/jira/write.go`:
 
@@ -4966,12 +4966,12 @@ func (m module) handleTransition(ctx context.Context, raw json.RawMessage) (any,
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/jira/ -v`
 Expected: PASS — all Jira tests.
 
-- [ ] **Step 5: Three-engine review gate**
+- [x] **Step 5: Three-engine review gate**
 
 Do not commit yet. Dispatch three independent reviews of *this task's diff only*, in parallel, one
 per engine. Each gets the same diff and the task's own "Interfaces" block, and a different lens.
@@ -6156,7 +6156,7 @@ git commit -m "feat(confluence): page create, update and comment via wiki repres
 
 The one automated check here guards a real failure mode: `.env.example` drifting from the variables the code actually reads, so an operator sets a name that is silently ignored.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 package core
@@ -6224,12 +6224,12 @@ func TestEnvExampleShipsNoToken(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/core/ -run TestEnvExample -v`
 Expected: FAIL — `.env.example` does not exist.
 
-- [ ] **Step 3: Write the files**
+- [x] **Step 3: Write the files**
 
 `.env.example`:
 
@@ -6557,7 +6557,7 @@ The design decisions and their reasoning are in `docs/plan/SPEC.md`; the
 task-by-task build is `docs/plan/2026-09-01-atlassian-mcp-lite.md`.
 ```
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run:
 ```bash
@@ -6568,7 +6568,7 @@ docker compose build
 ```
 Expected: vet clean, all tests PASS, binary builds, image builds.
 
-- [ ] **Step 5: Three-engine review gate**
+- [x] **Step 5: Three-engine review gate**
 
 Do not commit yet. Dispatch three independent reviews of *this task's diff only*, in parallel, one
 per engine. Each gets the same diff and the task's own "Interfaces" block, and a different lens.

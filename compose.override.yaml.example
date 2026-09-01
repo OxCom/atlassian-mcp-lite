@@ -81,8 +81,14 @@ services:
         - netrc
 
 secrets:
-  # Only the company CA here, not the whole bundle: the Dockerfile appends it
-  # to the image's existing ca-certificates.crt rather than replacing it.
+  # Only the company CA here, not the whole bundle: the Dockerfile concatenates
+  # it with the build image's own roots into a temporary file named through
+  # SSL_CERT_FILE, so the trust store is extended for the download and the CA
+  # never reaches a layer or the runtime image.
+  #
+  # Compose fails the ENTIRE project when a secret names a file that does not
+  # exist, so delete the netrc secret (and its entry under `build.secrets`
+  # above) on a machine with no ~/.netrc.
   corp_ca:
     file: ${CORP_CA_FILE:-/usr/local/share/ca-certificates/crytek.crt}
   netrc:

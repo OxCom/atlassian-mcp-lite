@@ -241,6 +241,24 @@ func TestToWikiHTMLBlockKeepsItsClosingTag(t *testing.T) {
 	}
 }
 
+// An HTML block is content, not markup this converter produced, so it goes
+// through the escaper like any other text. Passing it through raw was a hole
+// straight past the injection boundary: a block containing {code} opened a live
+// macro that swallowed the rest of the issue.
+func TestToWikiHTMLBlockCannotForgeWikiMarkup(t *testing.T) {
+	got := ToWiki("<div>{code}malicious{code}</div>")
+	if contains(got, "{code}") {
+		t.Errorf("output %q still contains a live macro", got)
+	}
+	if !contains(got, "malicious") {
+		t.Errorf("content lost: %q", got)
+	}
+	// Angle brackets mean nothing to wiki, so ordinary HTML is untouched.
+	if got, want := ToWiki("<div>block content</div>"), "<div>block content</div>"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 // Wiki monospace has no escape for its own terminator, so a code span
 // containing "}}" would end early and leak the rest as markup. Dropping the
 // monospace is the lesser loss; dropping the text is not allowed.
