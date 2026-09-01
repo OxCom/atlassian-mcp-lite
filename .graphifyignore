@@ -1,0 +1,54 @@
+.git/
+.idea/
+.vscode/
+.claude/
+.github/
+.cache/
+
+# Vault and graph symlinks — indexing these loops output back into input.
+docs/
+graphify-out
+graphify-out/
+
+# Dependencies and build output carry no architecture signal.
+vendor/
+bin/
+dist/
+
+# Go tests and fixtures: the exported API and its callers live in non-test files.
+*_test.go
+testdata/
+
+# Generated Go sources — the schema or proto is the real source of truth.
+*.pb.go
+*.pb.gw.go
+*_gen.go
+*_generated.go
+*_string.go
+mock_*.go
+mocks/
+zz_generated*.go
+
+# Binaries and non-code assets
+*.exe
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+*.pprof
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.pem
+*.key
+
+# Secrets and lockfiles
+.env
+.env.*
+.npmrc
+auth.json
+go.sum
+LICENSE
