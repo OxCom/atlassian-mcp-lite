@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Validation patterns. Every configured value that later becomes part of a URL
@@ -293,6 +294,53 @@ func (c Config) AllowProject(key string) bool { return allowed(c.WriteProjects, 
 
 // AllowSpace reports whether writes to a Confluence space key are permitted.
 func (c Config) AllowSpace(key string) bool { return allowed(c.WriteSpaces, key) }
+
+// RestrictsProjects and RestrictsSpaces report whether an allowlist is in force
+// at all. A module uses these to decide whether an extra verification round
+// trip is worth making: with no allowlist there is nothing to verify against,
+// and an unrestricted deployment should not pay for a check it never fails.
+func (c Config) RestrictsProjects() bool { return len(c.WriteProjects) > 0 }
+
+// RestrictsSpaces reports whether a Confluence space allowlist is in force.
+func (c Config) RestrictsSpaces() bool { return len(c.WriteSpaces) > 0 }
+
+// ClampLimit applies the configured default and hard cap to a caller's
+// requested result count. Zero or negative means "unspecified", which is the
+// default rather than an error, because the limit is a convenience and a
+// missing one should not fail a call.
+//
+// This lives in core because the two values it reads are core's: leaving each
+// product module to clamp for itself meant the same six lines in both, and a
+// limit policy that can drift apart is not a policy.
+func (c Config) ClampLimit(requested int) int {
+	if requested <= 0 {
+		return c.LimitDefault
+	}
+	if requested > c.LimitMax {
+		return c.LimitMax
+	}
+	return requested
+}
+
+// BoundBytes rejects a free-form string longer than limit bytes, naming the
+// field. Used where the point is to keep an unbounded payload off the wire.
+func BoundBytes(field, value string, limit int) error {
+	if len(value) > limit {
+		return fmt.Errorf("%s is %d bytes, limit is %d", field, len(value), limit)
+	}
+	return nil
+}
+
+// BoundRunes rejects a string longer than limit characters. Used where
+// Atlassian states a limit in characters: measuring those in bytes invents a
+// rejection the server would never have made, refusing a valid CJK or accented
+// value at a third of the real limit.
+func BoundRunes(field, value string, limit int) error {
+	if n := utf8.RuneCountInString(value); n > limit {
+		return fmt.Errorf("%s is %d characters, limit is %d", field, n, limit)
+	}
+	return nil
+}
 
 func allowed(list []string, key string) bool {
 	if len(list) == 0 {

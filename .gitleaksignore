@@ -1,0 +1,12 @@
+# Fingerprints gitleaks should not report. One line per finding, with the reason.
+#
+# Every entry here must name a value that is provably synthetic. A real
+# credential belongs in a rotation, not in this file.
+
+# internal/core/log_test.go:50 in commit 092331b — a base64 test fixture,
+# base64("user@example.com:secretvalue"), used to prove MaskHeaders hides an
+# Authorization credential. High entropy, so the generic-api-key rule matches
+# it. The working tree no longer contains the literal: the test computes the
+# value with BasicCredential instead. This entry exists only because the commit
+# is already in history and gitleaks scans history, not just the tip.
+092331b76d3f5e410f94759c83a9ccf92efdb35a:internal/core/log_test.go:generic-api-key:50

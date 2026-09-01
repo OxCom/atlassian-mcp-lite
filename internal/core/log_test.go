@@ -46,8 +46,10 @@ func TestMaskEmptyStaysEmpty(t *testing.T) {
 }
 
 func TestMaskHeadersPreservesAuthSchemeHidesCredential(t *testing.T) {
-	// The credential is the real base64 of "user@example.com:secretvalue".
-	const credential = "dXNlckBleGFtcGxlLmNvbTpzZWNyZXR2YWx1ZQ=="
+	// Computed, not a base64 literal. A hardcoded credential here is
+	// indistinguishable from a real one to a secret scanner, and gitleaks did
+	// flag the literal this replaced.
+	credential := BasicCredential("user@example.com", "secretvalue")
 	h := http.Header{}
 	h.Set("Authorization", "Basic "+credential)
 	h.Set("Accept", "application/json")

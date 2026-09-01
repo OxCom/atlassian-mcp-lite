@@ -1,0 +1,65 @@
+// Command atlassian-mcp-lite is a minimal MCP server for Jira and Confluence.
+package main
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/OxCom/atlassian-mcp-lite/internal/confluence"
+	"github.com/OxCom/atlassian-mcp-lite/internal/core"
+	"github.com/OxCom/atlassian-mcp-lite/internal/jira"
+)
+
+func main() {
+	// Logs go to stderr: stdout carries the MCP protocol stream.
+	bootLog := core.NewLogger(os.Getenv("ATLAS_LOG"), os.Stderr)
+
+	reg := &core.Registry{}
+	// Adding a module is one line here plus its package. Capability env vars
+	// are derived from the domain name, so core needs no change.
+	reg.Register(jira.New())
+	reg.Register(confluence.New())
+
+	cfg, err := core.Load(os.Getenv, reg.Domains())
+	if err != nil {
+		bootLog.Errorf("configuration: %v", err)
+		os.Exit(1)
+	}
+
+	// Both the raw token and the Base64 Basic credential are given to the
+	// logger, per core.BasicCredential's contract: an upstream error body can
+	// echo back either the token or the whole Authorization header value, and
+	// the encoded form is just as reusable as the raw one. core.NewServer
+	// redacts tool error results through the same logger, so neither reaches
+	// the MCP client either.
+	log := core.NewLogger(cfg.LogLevel, os.Stderr, cfg.Token, core.BasicCredential(cfg.Email, cfg.Token))
+	client := core.NewClient(cfg, log)
+
+	reg = &core.Registry{}
+	reg.Register(jira.NewWith(cfg, client))
+	reg.Register(confluence.NewWith(cfg, client))
+
+	srv, n, err := core.NewServer(cfg, reg, log)
+	if err != nil {
+		log.Errorf("build server: %v", err)
+		os.Exit(1)
+	}
+	if n == 0 {
+		log.Errorf("no tools enabled: check ATLAS_<DOMAIN>_{READ,WRITE,DESTRUCTIVE}")
+		os.Exit(1)
+	}
+	log.Debugf("serving %d tools over stdio", n)
+
+	// As PID 1 in a scratch container, ignoring SIGTERM means docker stop
+	// hangs until the kill timeout on every shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := core.Serve(ctx, srv); err != nil && !errors.Is(err, context.Canceled) {
+		log.Errorf("serve: %v", err)
+		os.Exit(1)
+	}
+}

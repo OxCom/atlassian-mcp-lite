@@ -244,3 +244,10 @@ func (l *Logger) redact(msg string) string {
 	}
 	return b.String()
 }
+
+// Redact returns s with every configured secret replaced by its masked form.
+//
+// It is exported because redaction cannot be the logger's private concern.
+// Upstream error text also travels back to the caller inside an error value,
+// and a credential echoed there would escape without ever being logged.
+func (l *Logger) Redact(s string) string { return l.redact(s) }

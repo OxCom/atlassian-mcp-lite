@@ -1,0 +1,142 @@
+package jira
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+)
+
+// maxNameLen bounds the free-form names a caller supplies for lookup — an
+// assignee query and a version name. Both travel to Jira as query parameters,
+// and neither has a legitimate use anywhere near this length. maxJQLLen bounds
+// the equivalent string on the read path; nothing user-controlled is unbounded.
+const maxNameLen = 256
+
+// lookupMaxResults caps the user search. Two is enough to detect ambiguity;
+// five leaves room for the error message to name the candidates.
+const lookupMaxResults = 5
+
+// accountIDFor resolves an email or display name to an accountId. An
+// unresolvable or ambiguous query is an error: silently assigning the wrong
+// person is worse than failing.
+//
+// Jira's user search is fuzzy — a partial name matches — so a single result is
+// not evidence that it is the right person. Only an exact email or display
+// name is accepted, however many results came back.
+// accountIDFor resolves an email or display name to an accountId. An
+// unresolvable or ambiguous query is an error: silently assigning the wrong
+// person is worse than failing.
+//
+// Jira's user search is a substring match, so a single result is not by itself
+// evidence of the right person — a query of "and" can return exactly one user
+// called "Alexander". The rules, in order:
+//
+//   - an exact email match wins, and is the escape hatch the ambiguity error
+//     tells the caller to use;
+//   - failing that, an exact display-name match wins, when it is the only one;
+//   - failing that, a single result is accepted only for an email-shaped query.
+//     Sites with GDPR privacy settings match on an address they then decline to
+//     return, so insisting on an exact email would make an emailed assignee
+//     unresolvable there — and a full address is not a plausible accidental
+//     substring of someone else's name.
+//
+// Anything else is refused.
+func (m module) accountIDFor(ctx context.Context, query string) (string, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return "", fmt.Errorf("assignee is empty")
+	}
+	if len(query) > maxNameLen {
+		return "", fmt.Errorf("assignee is %d bytes, limit is %d", len(query), maxNameLen)
+	}
+	var users []struct {
+		AccountID   string `json:"accountId"`
+		DisplayName string `json:"displayName"`
+		Email       string `json:"emailAddress"`
+	}
+	q := url.Values{"query": {query}, "maxResults": {fmt.Sprint(lookupMaxResults)}}
+	if err := m.client.Do(ctx, http.MethodGet, "/rest/api/3/user/search", q, nil, &users); err != nil {
+		return "", err
+	}
+	if len(users) == 0 {
+		return "", fmt.Errorf("no Atlassian user matches %q", query)
+	}
+
+	var byEmail, byName []string
+	names := make([]string, 0, len(users))
+	for _, u := range users {
+		if u.Email != "" && strings.EqualFold(u.Email, query) {
+			byEmail = append(byEmail, u.AccountID)
+		}
+		if u.DisplayName != "" && strings.EqualFold(u.DisplayName, query) {
+			byName = append(byName, u.AccountID)
+		}
+		names = append(names, u.DisplayName)
+	}
+	switch {
+	case len(byEmail) == 1:
+		return byEmail[0], nil
+	case len(byEmail) == 0 && len(byName) == 1:
+		return byName[0], nil
+	case len(users) == 1 && strings.Contains(query, "@"):
+		return users[0].AccountID, nil
+	}
+	return "", fmt.Errorf("%q does not identify exactly one Atlassian user (%d candidates: %s); use an exact email address",
+		query, len(users), strings.Join(names, ", "))
+}
+
+// versionIDFor resolves a version name to its id within a project.
+// versionIDFor resolves a version name to its id within a project.
+//
+// An exact name wins outright. Jira permits versions whose names differ only by
+// case, so a case-insensitive scan that returned the first hit would resolve
+// "Beta" to "beta"'s id — a silent wrong write.
+func (m module) versionIDFor(ctx context.Context, projectKey, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("fixVersion is empty")
+	}
+	if len(name) > maxNameLen {
+		return "", fmt.Errorf("fixVersion is %d bytes, limit is %d", len(name), maxNameLen)
+	}
+	// The project key reaches a URL path segment. It is validated rather than
+	// only escaped, so a value that is not a project key never becomes one.
+	if !reProjectKey.MatchString(projectKey) {
+		return "", fmt.Errorf("invalid project key %q", projectKey)
+	}
+	var versions []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	path := "/rest/api/3/project/" + url.PathEscape(projectKey) + "/versions"
+	if err := m.client.Do(ctx, http.MethodGet, path, nil, nil, &versions); err != nil {
+		return "", err
+	}
+
+	var folded []string
+	available := make([]string, 0, len(versions))
+	for _, v := range versions {
+		if v.Name == name {
+			return v.ID, nil
+		}
+		if strings.EqualFold(v.Name, name) {
+			folded = append(folded, v.ID)
+		}
+		available = append(available, v.Name)
+	}
+	// A case-insensitive match is accepted only when it is the only one.
+	if len(folded) == 1 {
+		return folded[0], nil
+	}
+	if len(folded) > 1 {
+		return "", fmt.Errorf("%q matches %d versions in %s differing only by case; use the exact name",
+			name, len(folded), projectKey)
+	}
+	if len(available) == 0 {
+		return "", fmt.Errorf("no version named %q in %s; the project has no versions", name, projectKey)
+	}
+	return "", fmt.Errorf("no version named %q in %s; available: %s",
+		name, projectKey, strings.Join(available, ", "))
+}
