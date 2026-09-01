@@ -30,8 +30,18 @@ test: ## run tests with the race detector and coverage
 
 ## --- individual stages ---
 
+# Runs every scan even when one fails, then fails at the end. A security sweep
+# that stops at the first finding hides the rest, and make's default behaviour
+# would have skipped gosec entirely.
 .PHONY: security
-security: gitleaks trufflehog govulncheck gosec ## all security scans
+security: ## all security scans; runs them all, then fails if any did
+	@rc=0; \
+	for t in gitleaks trufflehog govulncheck gosec; do \
+		printf '\n=== %s ===\n' "$$t"; \
+		$(MAKE) --no-print-directory $$t || rc=1; \
+	done; \
+	if [ $$rc -ne 0 ]; then echo; echo "security: at least one scan failed"; fi; \
+	exit $$rc
 
 .PHONY: gitleaks
 gitleaks: ## scan working tree and git history for secrets

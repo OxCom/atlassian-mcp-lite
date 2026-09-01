@@ -1,6 +1,9 @@
 package core
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
@@ -39,25 +42,168 @@ func TestLoadRequiresEachCredentialIndependently(t *testing.T) {
 }
 
 func TestCapabilityFlagSynonyms(t *testing.T) {
+	load := func(raw string) (Config, error) {
+		return Load(env(map[string]string{
+			"ATLAS_BASE_URL":  "https://x.atlassian.net",
+			"ATLAS_EMAIL":     "a@b.c",
+			"ATLAS_TOKEN":     "t",
+			"ATLAS_JIRA_READ": raw,
+		}), []string{"jira"})
+	}
 	for _, tc := range []struct {
 		raw  string
 		want bool
 	}{
 		{"true", true}, {"TRUE", true}, {" 1 ", true}, {"yes", true}, {"on", true},
-		{"false", false}, {"0", false}, {"", false}, {"ture", false},
+		{"false", false}, {"0", false}, {"no", false}, {"off", false}, {"", false},
 	} {
-		cfg, err := Load(env(map[string]string{
-			"ATLAS_BASE_URL":  "https://x.atlassian.net",
-			"ATLAS_EMAIL":     "a@b.c",
-			"ATLAS_TOKEN":     "t",
-			"ATLAS_JIRA_READ": tc.raw,
-		}), []string{"jira"})
+		cfg, err := load(tc.raw)
 		if err != nil {
 			t.Fatalf("%q: Load: %v", tc.raw, err)
 		}
 		if got := cfg.Domains["jira"].Read; got != tc.want {
 			t.Errorf("ATLAS_JIRA_READ=%q gave Read=%v, want %v", tc.raw, got, tc.want)
 		}
+	}
+	// A typo must not read as false: the operator would believe reads are on.
+	for _, raw := range []string{"ture", "yep", "2", "-1", "true false"} {
+		if _, err := load(raw); err == nil {
+			t.Errorf("ATLAS_JIRA_READ=%q must be rejected, not silently false", raw)
+		}
+	}
+}
+
+func TestLoadRejectsInvalidEmail(t *testing.T) {
+	load := func(email string) error {
+		_, err := Load(env(map[string]string{
+			"ATLAS_BASE_URL": "https://x.atlassian.net",
+			"ATLAS_EMAIL":    email,
+			"ATLAS_TOKEN":    "t",
+		}), []string{"jira"})
+		return err
+	}
+	for name, email := range map[string]string{
+		"no domain":      "nobody",
+		"no local part":  "@example.com",
+		"display name":   "A <a@b.c>",
+		"two addresses":  "a@b.c, d@e.f",
+		"colon":          "a:b@example.com",
+		"embedded CR":    "a@b.c\rX-Injected: 1",
+		"embedded LF":    "a@b.c\nX-Injected: 1",
+		"inner space":    "a b@example.com",
+		"bare host only": "a@",
+	} {
+		if err := load(email); err == nil {
+			t.Errorf("%s (%q) must be rejected", name, email)
+		}
+	}
+	for _, email := range []string{"a@b.c", "first.last+tag@example.co.uk", " a@b.c "} {
+		if err := load(email); err != nil {
+			t.Errorf("%q must be accepted: %v", email, err)
+		}
+	}
+}
+
+func TestLoadRejectsMalformedToken(t *testing.T) {
+	load := func(token string) error {
+		_, err := Load(env(map[string]string{
+			"ATLAS_BASE_URL": "https://x.atlassian.net",
+			"ATLAS_EMAIL":    "a@b.c",
+			"ATLAS_TOKEN":    token,
+		}), []string{"jira"})
+		return err
+	}
+	for name, token := range map[string]string{
+		"newline": "abc\ndef",
+		"CR":      "abc\rdef",
+		"tab":     "abc\tdef",
+		"space":   "abc def",
+		"NUL":     "abc\x00def",
+	} {
+		err := load(token)
+		if err == nil {
+			t.Errorf("%s token must be rejected", name)
+			continue
+		}
+		// A validation error must never carry the credential.
+		if strings.Contains(err.Error(), "abc") {
+			t.Errorf("%s: error message quotes the token: %v", name, err)
+		}
+	}
+	if err := load("ATATT3xFfGF0-abc_DEF.123:="); err != nil {
+		t.Errorf("a realistic Atlassian token must be accepted: %v", err)
+	}
+}
+
+func TestLoadValidatesEpicFieldID(t *testing.T) {
+	load := func(v string) (Config, error) {
+		return Load(env(map[string]string{
+			"ATLAS_BASE_URL":      "https://x.atlassian.net",
+			"ATLAS_EMAIL":         "a@b.c",
+			"ATLAS_TOKEN":         "t",
+			"ATLAS_EPIC_FIELD_ID": v,
+		}), []string{"jira"})
+	}
+	cfg, err := load("customfield_12345")
+	if err != nil || cfg.EpicFieldID != "customfield_12345" {
+		t.Errorf("override = %q, %v", cfg.EpicFieldID, err)
+	}
+	for _, raw := range []string{"custom field", "customfield-1", "../x", "cf?a=b", "10014", ""} {
+		if raw == "" {
+			// Empty falls back to the default rather than failing.
+			if cfg, err := load(raw); err != nil || cfg.EpicFieldID != "customfield_10014" {
+				t.Errorf("empty must default: %q, %v", cfg.EpicFieldID, err)
+			}
+			continue
+		}
+		if _, err := load(raw); err == nil {
+			t.Errorf("ATLAS_EPIC_FIELD_ID=%q must be rejected", raw)
+		}
+	}
+}
+
+func TestLoadValidatesAllowlistKeys(t *testing.T) {
+	for _, name := range []string{"ATLAS_WRITE_PROJECTS", "ATLAS_WRITE_SPACES"} {
+		for _, raw := range []string{"PROJ/../OTHER", "PROJ KEY", "PROJ*", `PROJ" OR 1=1`, "PR%20OJ", "..", "PROJ,../x"} {
+			if _, err := Load(env(map[string]string{
+				"ATLAS_BASE_URL": "https://x.atlassian.net",
+				"ATLAS_EMAIL":    "a@b.c",
+				"ATLAS_TOKEN":    "t",
+				name:             raw,
+			}), []string{"jira"}); err == nil {
+				t.Errorf("%s=%q must be rejected", name, raw)
+			}
+		}
+	}
+	// Confluence personal space keys are prefixed with a tilde.
+	if _, err := Load(env(map[string]string{
+		"ATLAS_BASE_URL":     "https://x.atlassian.net",
+		"ATLAS_EMAIL":        "a@b.c",
+		"ATLAS_TOKEN":        "t",
+		"ATLAS_WRITE_SPACES": "~712020abc, DOCS_1",
+	}), []string{"confluence"}); err != nil {
+		t.Errorf("personal space key must be accepted: %v", err)
+	}
+}
+
+func TestLoadValidatesDomainNames(t *testing.T) {
+	load := func(domains []string) error {
+		_, err := Load(env(map[string]string{
+			"ATLAS_BASE_URL": "https://x.atlassian.net",
+			"ATLAS_EMAIL":    "a@b.c",
+			"ATLAS_TOKEN":    "t",
+		}), domains)
+		return err
+	}
+	for _, domains := range [][]string{
+		{""}, {"Jira"}, {"ji ra"}, {"ji-ra"}, {"1jira"}, {"jira", "jira"},
+	} {
+		if err := load(domains); err == nil {
+			t.Errorf("domains %q must be rejected", domains)
+		}
+	}
+	if err := load([]string{"jira", "confluence", "service_desk"}); err != nil {
+		t.Errorf("valid domains rejected: %v", err)
 	}
 }
 
@@ -232,31 +378,44 @@ func TestLogLevel(t *testing.T) {
 	}
 }
 
-func TestLimitParsingAndClamp(t *testing.T) {
-	load := func(def, max string) Config {
-		cfg, err := Load(env(map[string]string{
+func TestLimitValidation(t *testing.T) {
+	load := func(def, max string) (Config, error) {
+		return Load(env(map[string]string{
 			"ATLAS_BASE_URL":      "https://x.atlassian.net",
 			"ATLAS_EMAIL":         "a@b.c",
 			"ATLAS_TOKEN":         "t",
 			"ATLAS_LIMIT_DEFAULT": def,
 			"ATLAS_LIMIT_MAX":     max,
 		}), []string{"jira"})
-		if err != nil {
-			t.Fatalf("Load(%q, %q): %v", def, max, err)
-		}
-		return cfg
 	}
-	if cfg := load("10", "25"); cfg.LimitDefault != 10 || cfg.LimitMax != 25 {
+	cfg, err := load("10", "25")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LimitDefault != 10 || cfg.LimitMax != 25 {
 		t.Errorf("custom limits = %d/%d, want 10/25", cfg.LimitDefault, cfg.LimitMax)
 	}
-	// Parsing is strict: anything that is not a positive integer falls back.
-	for _, raw := range []string{"20x", "0", "-5", "abc", " "} {
-		if cfg := load(raw, "50"); cfg.LimitDefault != 20 {
-			t.Errorf("ATLAS_LIMIT_DEFAULT=%q gave %d, want the 20 default", raw, cfg.LimitDefault)
+
+	// A value that is set but unparsable is a typo in a bound on result size,
+	// so it fails rather than falling back to the default.
+	for _, raw := range []string{"20x", "0", "-5", "abc", "1e3", "20 30"} {
+		if _, err := load(raw, "50"); err == nil {
+			t.Errorf("ATLAS_LIMIT_DEFAULT=%q must be rejected", raw)
 		}
 	}
-	if cfg := load("40", "30"); cfg.LimitDefault != 30 || cfg.LimitMax != 30 {
-		t.Errorf("default above max = %d/%d, want both 30", cfg.LimitDefault, cfg.LimitMax)
+	// Unset still means the default.
+	if cfg, err := load("", ""); err != nil || cfg.LimitDefault != 20 || cfg.LimitMax != 50 {
+		t.Errorf("unset limits = %d/%d, %v; want 20/50", cfg.LimitDefault, cfg.LimitMax, err)
+	}
+	// A default above the max is a contradiction, not something to clamp.
+	if _, err := load("40", "30"); err == nil {
+		t.Error("ATLAS_LIMIT_DEFAULT above ATLAS_LIMIT_MAX must be rejected")
+	}
+	if _, err := load("20", "1001"); err == nil {
+		t.Error("ATLAS_LIMIT_MAX above the ceiling must be rejected")
+	}
+	if _, err := load("20", "1000"); err != nil {
+		t.Errorf("ATLAS_LIMIT_MAX at the ceiling must be accepted: %v", err)
 	}
 }
 

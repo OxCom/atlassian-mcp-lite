@@ -50,10 +50,12 @@ jobs:
           govulncheck ./...
 
       - name: gosec (static analysis of our own code)
+        # Installed rather than pulled: the securego/gosec image lags the
+        # releases by months (2.24.6 vs v2.29.0), and this keeps CI on the same
+        # version as `make gosec`.
         run: |
-          docker run --rm -v "$PWD:/src" -w /src \
-            securego/gosec:2.29.0 \
-            -severity medium -confidence medium -exclude-dir=docs ./...
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+          gosec -severity medium -confidence medium -exclude-dir=docs ./...
 
       - name: go.mod is tidy
         run: go mod tidy -diff
@@ -71,12 +73,12 @@ jobs:
       - name: golangci-lint
         run: |
           docker run --rm -v "$PWD:/src" -w /src \
-            golangci/golangci-lint:v2.13.2-alpine \
+            golangci/golangci-lint:v2.13.2 \
             golangci-lint run --timeout 5m
       - name: formatting is clean
         run: |
           docker run --rm -v "$PWD:/src" -w /src \
-            golangci/golangci-lint:v2.13.2-alpine \
+            golangci/golangci-lint:v2.13.2 \
             golangci-lint fmt --diff
 
   test:

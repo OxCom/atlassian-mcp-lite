@@ -8,7 +8,11 @@
 name: atlassian-mcp-lite-dev
 
 x-go: &go
-  image: golang:1.27-alpine
+  # Debian, not Alpine. The race detector needs cgo and a C compiler; Alpine
+  # ships neither, which previously forced -race into a separate service on a
+  # second image. The codename is pinned because the bare `golang:1.27` tag
+  # follows Debian stable and would change base distribution under us.
+  image: golang:1.27-trixie
   working_dir: /src
   volumes:
     - .:/src
@@ -24,8 +28,14 @@ services:
     <<: *go
     command: go build -trimpath -ldflags="-s -w" -o /src/bin/atlassian-mcp-lite ./cmd/atlassian-mcp-lite
 
+  # -race is the default now that the image has a C toolchain. CGO is enabled
+  # for this service only; every build path stays CGO-free so the binary can
+  # run in a scratch container.
   test:
     <<: *go
+    environment:
+      CGO_ENABLED: "1"
+      GOFLAGS: -buildvcs=false
     command: go test ./... -race -covermode=atomic -coverprofile=coverage.out
 
   cover:
@@ -42,7 +52,7 @@ services:
 
   # --- lint ---
   lint:
-    image: golangci/golangci-lint:v2.13.2-alpine
+    image: golangci/golangci-lint:v2.13.2
     working_dir: /src
     volumes:
       - .:/src
@@ -51,7 +61,7 @@ services:
     command: golangci-lint run --timeout 5m
 
   fmt:
-    image: golangci/golangci-lint:v2.13.2-alpine
+    image: golangci/golangci-lint:v2.13.2
     working_dir: /src
     volumes:
       - .:/src
@@ -65,13 +75,14 @@ services:
     <<: *go
     command: sh -c "go install golang.org/x/vuln/cmd/govulncheck@v1.7.0 && govulncheck ./..."
 
-  # Static analysis of our own code.
+  # Static analysis of our own code. Installed with go install rather than run
+  # from securego/gosec: that image lags the releases badly (2.24.6 in
+  # February against v2.29.0 in August), and this way gosec shares the same
+  # image, module cache and TLS trust configuration as every other Go tool.
   gosec:
-    image: securego/gosec:2.29.0
-    working_dir: /src
-    volumes:
-      - .:/src
-    command: -severity medium -confidence medium ./...
+    <<: *go
+    command: sh -c "go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0 && gosec -severity medium -confidence medium ./..."
+
 
   # Secret scanning: committed files and full git history.
   gitleaks:

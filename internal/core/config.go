@@ -7,10 +7,30 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/mail"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// Validation patterns. Every configured value that later becomes part of a URL
+// path, a query string or a JSON field name is checked against a strict
+// allowlist here, at the trust boundary, rather than at the point of use.
+var (
+	// A domain name becomes part of an environment variable name, so it must
+	// contain nothing that cannot appear in one.
+	domainRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	// Jira project keys and Confluence space keys travel in URL paths and in
+	// JQL/CQL. Confluence personal spaces are prefixed with "~".
+	keyRe = regexp.MustCompile(`^~?[A-Za-z0-9_]+$`)
+	// A Jira field id is a JSON object key and a query-string value.
+	fieldIDRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
+)
+
+// limitCeiling bounds ATLAS_LIMIT_MAX. Atlassian pages results, so an
+// unbounded limit is a request to buffer an unbounded response.
+const limitCeiling = 1000
 
 // Caps is the set of action classes enabled for one domain.
 type Caps struct {
@@ -47,14 +67,12 @@ type Config struct {
 // here.
 func Load(getenv func(string) string, domains []string) (Config, error) {
 	cfg := Config{
-		BaseURL:      strings.TrimRight(strings.TrimSpace(getenv("ATLAS_BASE_URL")), "/"),
-		Email:        strings.TrimSpace(getenv("ATLAS_EMAIL")),
-		Token:        strings.TrimSpace(getenv("ATLAS_TOKEN")),
-		Domains:      make(map[string]Caps, len(domains)),
-		LogLevel:     strings.ToLower(orDefault(getenv("ATLAS_LOG"), "info")),
-		LimitDefault: intOrDefault(getenv("ATLAS_LIMIT_DEFAULT"), 20),
-		LimitMax:     intOrDefault(getenv("ATLAS_LIMIT_MAX"), 50),
-		EpicFieldID:  orDefault(getenv("ATLAS_EPIC_FIELD_ID"), "customfield_10014"),
+		BaseURL:     strings.TrimRight(strings.TrimSpace(getenv("ATLAS_BASE_URL")), "/"),
+		Email:       strings.TrimSpace(getenv("ATLAS_EMAIL")),
+		Token:       strings.TrimSpace(getenv("ATLAS_TOKEN")),
+		Domains:     make(map[string]Caps, len(domains)),
+		LogLevel:    strings.ToLower(orDefault(getenv("ATLAS_LOG"), "info")),
+		EpicFieldID: orDefault(getenv("ATLAS_EPIC_FIELD_ID"), "customfield_10014"),
 	}
 
 	for _, required := range []struct {
@@ -69,6 +87,18 @@ func Load(getenv func(string) string, domains []string) (Config, error) {
 		}
 	}
 
+	if err := validateBaseURL(cfg.BaseURL); err != nil {
+		return Config{}, fmt.Errorf("ATLAS_BASE_URL: %w", err)
+	}
+	if err := validateEmail(cfg.Email); err != nil {
+		return Config{}, fmt.Errorf("ATLAS_EMAIL: %w", err)
+	}
+	// The token itself is never echoed in an error: a value that reached a log
+	// through a diagnostic message would defeat the masking the spec requires.
+	if err := validateToken(cfg.Token); err != nil {
+		return Config{}, fmt.Errorf("ATLAS_TOKEN: %w", err)
+	}
+
 	// ATLAS_LOG is a closed enum. An unknown value would leave the level
 	// undefined for whichever component consumes it, so it fails at load.
 	switch cfg.LogLevel {
@@ -77,17 +107,41 @@ func Load(getenv func(string) string, domains []string) (Config, error) {
 		return Config{}, fmt.Errorf("ATLAS_LOG: %q is not a known level; use info or debug", cfg.LogLevel)
 	}
 
-	if err := validateBaseURL(cfg.BaseURL); err != nil {
-		return Config{}, fmt.Errorf("ATLAS_BASE_URL: %w", err)
+	if !fieldIDRe.MatchString(cfg.EpicFieldID) {
+		return Config{}, fmt.Errorf("ATLAS_EPIC_FIELD_ID: %q is not a valid field id; expected a name such as customfield_10014", cfg.EpicFieldID)
 	}
 
+	seen := make(map[string]struct{}, len(domains))
 	for _, d := range domains {
-		prefix := "ATLAS_" + strings.ToUpper(d) + "_"
-		cfg.Domains[d] = Caps{
-			Read:        isTrue(getenv(prefix + "READ")),
-			Write:       isTrue(getenv(prefix + "WRITE")),
-			Destructive: isTrue(getenv(prefix + "DESTRUCTIVE")),
+		if !domainRe.MatchString(d) {
+			return Config{}, fmt.Errorf("domain %q is not a valid domain name; expected lowercase letters, digits and underscores", d)
 		}
+		if _, dup := seen[d]; dup {
+			return Config{}, fmt.Errorf("domain %q is registered twice", d)
+		}
+		seen[d] = struct{}{}
+
+		prefix := "ATLAS_" + strings.ToUpper(d) + "_"
+		caps := Caps{}
+		for _, flag := range []struct {
+			suffix string
+			dst    *bool
+		}{
+			{"READ", &caps.Read},
+			{"WRITE", &caps.Write},
+			{"DESTRUCTIVE", &caps.Destructive},
+		} {
+			// A typo such as "ture" must not quietly mean false: it would
+			// disable a capability the operator believes is on, or — read the
+			// other way round in a future refactor — enable one they believe is
+			// off. Either way the operator gets no signal, so it fails at load.
+			v, err := parseBool(getenv(prefix + flag.suffix))
+			if err != nil {
+				return Config{}, fmt.Errorf("%s%s: %w", prefix, flag.suffix, err)
+			}
+			*flag.dst = v
+		}
+		cfg.Domains[d] = caps
 	}
 
 	for _, list := range []struct {
@@ -98,19 +152,87 @@ func Load(getenv func(string) string, domains []string) (Config, error) {
 		{"ATLAS_WRITE_SPACES", &cfg.WriteSpaces},
 	} {
 		raw := getenv(list.name)
-		*list.dst = splitList(raw)
+		keys := splitList(raw)
 		// Unset and empty both mean unrestricted. A value that is neither, but
-		// yields no keys (","  or "  ,  "), expresses intent to restrict and
-		// would silently allow everything, so it is rejected instead.
-		if strings.TrimSpace(raw) != "" && len(*list.dst) == 0 {
+		// yields no keys ("," or " , "), expresses intent to restrict and would
+		// silently allow everything, so it is rejected instead.
+		if strings.TrimSpace(raw) != "" && len(keys) == 0 {
 			return Config{}, fmt.Errorf("%s is set but contains no keys", list.name)
 		}
+		for _, k := range keys {
+			// A key reaches a URL path and a JQL/CQL clause. Anything outside
+			// the allowlist could only get there as an injection attempt or a
+			// typo, and an allowlist entry that never matches a real key would
+			// fail closed silently.
+			if !keyRe.MatchString(k) {
+				return Config{}, fmt.Errorf("%s: %q is not a valid key", list.name, k)
+			}
+		}
+		*list.dst = keys
 	}
 
+	var err error
+	if cfg.LimitDefault, err = positiveInt(getenv("ATLAS_LIMIT_DEFAULT"), 20); err != nil {
+		return Config{}, fmt.Errorf("ATLAS_LIMIT_DEFAULT: %w", err)
+	}
+	if cfg.LimitMax, err = positiveInt(getenv("ATLAS_LIMIT_MAX"), 50); err != nil {
+		return Config{}, fmt.Errorf("ATLAS_LIMIT_MAX: %w", err)
+	}
+	if cfg.LimitMax > limitCeiling {
+		return Config{}, fmt.Errorf("ATLAS_LIMIT_MAX: %d exceeds the ceiling of %d", cfg.LimitMax, limitCeiling)
+	}
+	// Silently clamping would hand back a configuration the operator did not
+	// write, and the mismatch is a plain contradiction, so it is an error.
 	if cfg.LimitDefault > cfg.LimitMax {
-		cfg.LimitDefault = cfg.LimitMax
+		return Config{}, fmt.Errorf("ATLAS_LIMIT_DEFAULT (%d) must not exceed ATLAS_LIMIT_MAX (%d)", cfg.LimitDefault, cfg.LimitMax)
 	}
 	return cfg, nil
+}
+
+// validateEmail checks the address is a single parseable mailbox with no
+// display name. The address becomes the user half of an HTTP Basic credential,
+// so a control character or a colon in it would corrupt that credential.
+func validateEmail(raw string) error {
+	if strings.ContainsAny(raw, ":") {
+		return errors.New("must not contain a colon; it is the HTTP Basic separator")
+	}
+	if err := hasNoControlChars(raw); err != nil {
+		return err
+	}
+	addr, err := mail.ParseAddress(raw)
+	if err != nil {
+		return fmt.Errorf("not a valid email address: %w", err)
+	}
+	if addr.Name != "" || addr.Address != raw {
+		return fmt.Errorf("must be a bare address, not %q", raw)
+	}
+	if !strings.Contains(addr.Address, "@") {
+		return errors.New("must contain a domain")
+	}
+	return nil
+}
+
+// validateToken checks only structure, never content, and its errors never
+// quote the value.
+func validateToken(raw string) error {
+	if err := hasNoControlChars(raw); err != nil {
+		return err
+	}
+	if strings.ContainsAny(raw, " \t") {
+		return errors.New("must not contain whitespace")
+	}
+	return nil
+}
+
+// hasNoControlChars rejects C0 and C1 control characters, which have no place
+// in a credential or a header value.
+func hasNoControlChars(raw string) error {
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("must not contain control character %#U", r)
+		}
+	}
+	return nil
 }
 
 // validateBaseURL rejects a base URL that would leak credentials or break path
@@ -185,12 +307,20 @@ func allowed(list []string, key string) bool {
 	return false
 }
 
-func isTrue(s string) bool {
+// parseBool accepts the usual spellings of both truth values. An unset value
+// is false — a capability is off until it is turned on — but an unrecognised
+// one is an error rather than a silent false.
+func parseBool(s string) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return false, nil
 	case "1", "true", "yes", "on":
-		return true
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%q is not a boolean; use true or false", s)
 	}
-	return false
 }
 
 func splitList(s string) []string {
@@ -210,13 +340,20 @@ func orDefault(s, def string) string {
 	return s
 }
 
-// intOrDefault parses a positive decimal integer, falling back to def for
-// anything else. Parsing is strict: a value like "20x" is a misconfiguration,
-// not a 20.
-func intOrDefault(s string, def int) int {
-	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil || n <= 0 {
-		return def
+// positiveInt parses a positive decimal integer, using def only when the value
+// is unset. Anything set but unparsable is a misconfiguration, not a fallback:
+// "20x" silently becoming 20 hides a typo in a value that bounds result sizes.
+func positiveInt(s string, def int) (int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def, nil
 	}
-	return n
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not an integer", s)
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("%d must be at least 1", n)
+	}
+	return n, nil
 }

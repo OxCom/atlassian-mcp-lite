@@ -9,6 +9,11 @@
 # when it exists, so `make test`, `make lint` and `make image` all pick it up.
 #
 # Nothing here belongs in git: it names internal hosts and points at credentials.
+#
+# Only name services that compose.yaml or compose.dev.yaml already define. An
+# override that introduces a service of its own gives it no image and no build
+# context, and Compose rejects the whole project with
+# "service X has neither an image nor a build context specified".
 
 services:
 
@@ -26,14 +31,20 @@ services:
       GOSUMDB: "off"
       # GOPRIVATE: git.example.com/*
       #
-      # The company root CA, so TLS to Artifactory and to Atlassian through the
-      # inspecting proxy verifies. Go reads SSL_CERT_FILE directly on Linux,
-      # so no update-ca-certificates run is needed.
-      SSL_CERT_FILE: /etc/ssl/corp/corp-ca.crt
-      GIT_SSL_CAINFO: /etc/ssl/corp/corp-ca.crt
+      # Trust store for TLS to Artifactory, to Atlassian, and to
+      # proxy.golang.org through the inspecting proxy. Go reads SSL_CERT_FILE
+      # directly on Linux, so no update-ca-certificates run is needed.
+      #
+      # This must be a bundle that contains BOTH the public roots and the
+      # company CA. Pointing it at the company CA alone REPLACES the trust
+      # store rather than extending it, so anything the proxy does not
+      # re-sign then fails to verify. The host's own bundle already has both,
+      # which is why it is the default below.
+      SSL_CERT_FILE: /etc/ssl/corp/bundle.crt
+      GIT_SSL_CAINFO: /etc/ssl/corp/bundle.crt
     volumes:
       # Read-only, and outside the repository so it is never committed.
-      - ${CORP_CA_FILE:-/etc/ssl/certs/corp-ca.crt}:/etc/ssl/corp/corp-ca.crt:ro
+      - ${CORP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}:/etc/ssl/corp/bundle.crt:ro
       # Artifactory credentials. Generate the token in Artifactory's UI; a
       # .netrc keeps it out of the GOPROXY URL and out of process arguments.
       #   machine artifactory.example.com login <user> password <api-token>
@@ -44,6 +55,7 @@ services:
   vet: *corp
   tidy: *corp
   govulncheck: *corp
+  gosec: *corp
 
   # golangci-lint runs the Go toolchain too, but its image has a different
   # HOME, so the netrc path differs.
@@ -51,9 +63,9 @@ services:
     environment:
       GOPROXY: https://artifactory.example.com/artifactory/api/go/go
       GOSUMDB: "off"
-      SSL_CERT_FILE: /etc/ssl/corp/corp-ca.crt
+      SSL_CERT_FILE: /etc/ssl/corp/bundle.crt
     volumes:
-      - ${CORP_CA_FILE:-/etc/ssl/certs/corp-ca.crt}:/etc/ssl/corp/corp-ca.crt:ro
+      - ${CORP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}:/etc/ssl/corp/bundle.crt:ro
       - ${HOME}/.netrc:/root/.netrc:ro
 
   # --- Production image build ------------------------------------------------
@@ -69,7 +81,9 @@ services:
         - netrc
 
 secrets:
+  # Only the company CA here, not the whole bundle: the Dockerfile appends it
+  # to the image's existing ca-certificates.crt rather than replacing it.
   corp_ca:
-    file: ${CORP_CA_FILE:-/etc/ssl/certs/corp-ca.crt}
+    file: ${CORP_CA_FILE:-/usr/local/share/ca-certificates/crytek.crt}
   netrc:
     file: ${HOME}/.netrc
