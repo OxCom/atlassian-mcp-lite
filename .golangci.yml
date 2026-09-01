@@ -1,0 +1,59 @@
+# golangci-lint v2 configuration.
+# Run via Docker: make lint
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose      # every http.Response.Body must be closed
+    - contextcheck   # context must be propagated, not dropped
+    - errorlint      # error wrapping and comparison correctness
+    - copyloopvar
+    - goconst
+    - gocritic
+    - misspell
+    - nilerr         # returning nil after a non-nil error
+    - noctx          # HTTP requests without a context
+    - prealloc
+    - revive
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - wastedassign
+    - whitespace
+  # gosec is deliberately NOT enabled here: it runs in the security stage with
+  # its own configuration, so lint failures and security failures stay distinct.
+
+  settings:
+    revive:
+      rules:
+        - name: exported          # exported identifiers need doc comments
+        - name: error-strings     # error strings are lowercase, unpunctuated
+        - name: context-as-argument
+        - name: indent-error-flow
+    goconst:
+      min-len: 3
+      min-occurrences: 4
+    gocritic:
+      enabled-tags: [diagnostic, style, performance]
+      disabled-checks:
+        - hugeParam   # noisy for the config struct passed by value
+
+  exclusions:
+    rules:
+      # Table-driven tests legitimately repeat literals and skip some checks.
+      - path: _test\.go
+        linters: [goconst, unparam, errorlint]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/OxCom/atlassian-mcp-lite
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

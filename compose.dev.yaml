@@ -1,0 +1,94 @@
+# Development toolchain. Nothing is installed on the host: every tool runs in a
+# pinned container. Use the Makefile targets rather than these directly.
+#
+#   docker compose -f compose.dev.yaml run --rm <service>
+#
+# The module cache is a named volume so repeated runs do not re-download.
+
+name: atlassian-mcp-lite-dev
+
+x-go: &go
+  image: golang:1.27-alpine
+  working_dir: /src
+  volumes:
+    - .:/src
+    - gomod:/go/pkg/mod
+    - gobuild:/root/.cache/go-build
+  environment:
+    CGO_ENABLED: "0"
+    GOFLAGS: -buildvcs=false
+
+services:
+  # --- build and test ---
+  build:
+    <<: *go
+    command: go build -trimpath -ldflags="-s -w" -o /src/bin/atlassian-mcp-lite ./cmd/atlassian-mcp-lite
+
+  test:
+    <<: *go
+    command: go test ./... -race -covermode=atomic -coverprofile=coverage.out
+
+  cover:
+    <<: *go
+    command: sh -c "go test ./... -covermode=atomic -coverprofile=coverage.out && go tool cover -func=coverage.out"
+
+  vet:
+    <<: *go
+    command: go vet ./...
+
+  tidy:
+    <<: *go
+    command: go mod tidy -diff
+
+  # --- lint ---
+  lint:
+    image: golangci/golangci-lint:v2.13.2-alpine
+    working_dir: /src
+    volumes:
+      - .:/src
+      - gomod:/go/pkg/mod
+      - golangci:/root/.cache/golangci-lint
+    command: golangci-lint run --timeout 5m
+
+  fmt:
+    image: golangci/golangci-lint:v2.13.2-alpine
+    working_dir: /src
+    volumes:
+      - .:/src
+      - gomod:/go/pkg/mod
+    command: golangci-lint fmt
+
+  # --- security ---
+  # Dependency vulnerabilities, filtered to those actually reachable from this
+  # code. Covers both the module graph and our own call paths.
+  govulncheck:
+    <<: *go
+    command: sh -c "go install golang.org/x/vuln/cmd/govulncheck@v1.7.0 && govulncheck ./..."
+
+  # Static analysis of our own code.
+  gosec:
+    image: securego/gosec:2.29.0
+    working_dir: /src
+    volumes:
+      - .:/src
+    command: -severity medium -confidence medium ./...
+
+  # Secret scanning: committed files and full git history.
+  gitleaks:
+    image: ghcr.io/gitleaks/gitleaks:v8.30.1
+    working_dir: /src
+    volumes:
+      - .:/src
+    command: detect --source=/src --redact --verbose
+
+  trufflehog:
+    image: trufflesecurity/trufflehog:3.97.1
+    working_dir: /src
+    volumes:
+      - .:/src
+    command: filesystem /src --results=verified,unknown --fail
+
+volumes:
+  gomod:
+  gobuild:
+  golangci:

@@ -33,6 +33,15 @@ compose.override.yaml
 .docker/
 docker/data/
 
+# Corporate network overrides
+# compose.override.yaml is ignored above. These are the files it points at: a
+# company CA bundle and Artifactory credentials. Neither belongs in the repo,
+# and the example override keeps them outside it by default.
+certs/
+*.crt
+!testdata/**/*.crt
+.netrc
+
 # Environment and secrets
 # .env holds the Atlassian site URL and API token; never commit it. The example file is tracked.
 .env

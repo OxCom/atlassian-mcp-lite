@@ -1,0 +1,75 @@
+# Corporate-network overrides. Copy to `compose.override.yaml` (gitignored) and
+# edit. Delete the blocks you do not need — every one of them is optional, and a
+# machine outside the office should have no override file at all.
+#
+#   cp compose.override.yaml.example compose.override.yaml
+#
+# Compose does NOT auto-load an override when files are passed with -f, which is
+# how the Makefile invokes it. The Makefile therefore adds this file explicitly
+# when it exists, so `make test`, `make lint` and `make image` all pick it up.
+#
+# Nothing here belongs in git: it names internal hosts and points at credentials.
+
+services:
+
+  # --- Go tooling: module downloads through JFrog Artifactory -----------------
+  # Applies to every service that runs the Go toolchain. Anchors do not cross
+  # files, so each service is listed explicitly.
+  build: &corp
+    environment:
+      # Artifactory's Go repository, used instead of proxy.golang.org.
+      GOPROXY: https://artifactory.example.com/artifactory/api/go/go
+      # The public checksum database is usually unreachable from behind the
+      # proxy. Turning it off trades supply-chain verification for the ability
+      # to build at all: prefer GOPRIVATE for internal modules and leave GOSUMDB
+      # on if Artifactory can reach sum.golang.org.
+      GOSUMDB: "off"
+      # GOPRIVATE: git.example.com/*
+      #
+      # The company root CA, so TLS to Artifactory and to Atlassian through the
+      # inspecting proxy verifies. Go reads SSL_CERT_FILE directly on Linux,
+      # so no update-ca-certificates run is needed.
+      SSL_CERT_FILE: /etc/ssl/corp/corp-ca.crt
+      GIT_SSL_CAINFO: /etc/ssl/corp/corp-ca.crt
+    volumes:
+      # Read-only, and outside the repository so it is never committed.
+      - ${CORP_CA_FILE:-/etc/ssl/certs/corp-ca.crt}:/etc/ssl/corp/corp-ca.crt:ro
+      # Artifactory credentials. Generate the token in Artifactory's UI; a
+      # .netrc keeps it out of the GOPROXY URL and out of process arguments.
+      #   machine artifactory.example.com login <user> password <api-token>
+      - ${HOME}/.netrc:/root/.netrc:ro
+
+  test: *corp
+  cover: *corp
+  vet: *corp
+  tidy: *corp
+  govulncheck: *corp
+
+  # golangci-lint runs the Go toolchain too, but its image has a different
+  # HOME, so the netrc path differs.
+  lint:
+    environment:
+      GOPROXY: https://artifactory.example.com/artifactory/api/go/go
+      GOSUMDB: "off"
+      SSL_CERT_FILE: /etc/ssl/corp/corp-ca.crt
+    volumes:
+      - ${CORP_CA_FILE:-/etc/ssl/certs/corp-ca.crt}:/etc/ssl/corp/corp-ca.crt:ro
+      - ${HOME}/.netrc:/root/.netrc:ro
+
+  # --- Production image build ------------------------------------------------
+  # Build args cover the proxy; the CA and credentials travel as BuildKit
+  # secrets so they never land in an image layer or in `docker history`.
+  atlassian-mcp-lite:
+    build:
+      args:
+        GOPROXY: https://artifactory.example.com/artifactory/api/go/go
+        GOSUMDB: "off"
+      secrets:
+        - corp_ca
+        - netrc
+
+secrets:
+  corp_ca:
+    file: ${CORP_CA_FILE:-/etc/ssl/certs/corp-ca.crt}
+  netrc:
+    file: ${HOME}/.netrc
