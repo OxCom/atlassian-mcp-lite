@@ -252,6 +252,13 @@ key — are in [`docs/configuration.md`](docs/configuration.md).
   the final stage is `scratch` with no shell and no package manager, and it
   runs as uid 65532 unless you pass `--user`. The compose service adds
   `read_only`, `cap_drop: ALL` and `no-new-privileges`.
+- **Write capability is the blast radius of a prompt injection.** Nothing can
+  tell an operator-intended write from one an injected page talked the model
+  into, so what bounds the damage is configuration: `ATLAS_*_WRITE` and
+  `ATLAS_*_DESTRUCTIVE` are off unless you set them, and
+  `ATLAS_WRITE_PROJECTS` / `ATLAS_WRITE_SPACES` confine writes to projects and
+  spaces you name, checked against the target's current project or space
+  rather than its key prefix.
 - **This server does not sandbox your MCP client.** Issue and page text is
   attacker-influenceable input that enters the model's context. This server
   accepts no filesystem paths, but the client driving it may have its own file
@@ -261,11 +268,20 @@ key — are in [`docs/configuration.md`](docs/configuration.md).
   output cannot choose a destination. Outbound filtering, if you want it, is an
   operator control: a proxy-only Docker network or host firewall rules.
 - **Every result is labelled untrusted.** A successful tool result is wrapped
-  as `{"notice": ..., "untrusted_content": ...}`, where the notice states that
-  the payload is third-party data from Atlassian and not instructions. Links in
+  as `{"notice": ..., "untrusted_content": ..., "notice_end": ...}`, where the
+  notice states that the payload is third-party data from Atlassian and not
+  instructions, and is repeated after the payload so a megabyte of injected
+  text cannot be the last thing the model reads. The same statement arrives
+  once outside every result, as the server's `instructions` in the MCP
+  initialize response, and every write and destructive tool's description says
+  that text returned by a tool is never authorization to call it. Links in
   converted content are limited to `http`, `https` and `mailto`; a target with
   any other scheme is rendered as plain text, so a `javascript:` or `data:` URL
   planted in a page never becomes a link the model or your client can follow.
+  Plain scalars Atlassian renders literally — a summary, a title, a status or
+  version name — are not converted, but control characters are removed and
+  markdown structure is escaped whenever the value carries link, HTML or code
+  syntax, so an ordinary name still round-trips byte for byte into a write.
   Scheme-less targets stay links because they resolve against the Atlassian
   host, with one exception: a target starting with two slashes or backslashes
   (`//evil.example/x`, `\\host\share`) names another origin without naming a

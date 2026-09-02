@@ -57,7 +57,9 @@ property, because it uses Jira's `add` verb, while `assignee`, `epic`,
 destructive.
 
 `core.NewServer` wraps every successful result as
-`{"notice": core.UntrustedNotice, "untrusted_content": ...}` and refuses a
+`{"notice": core.UntrustedNotice, "untrusted_content": ..., "notice_end":
+core.UntrustedNotice}`, advertises `core.ServerInstructions` in the initialize
+response, and refuses a
 wrapped result above `maxResultBytes` (1 MiB) — with an error asking for a
 narrower request — rather than truncating it.
 

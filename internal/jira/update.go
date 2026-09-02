@@ -34,7 +34,7 @@ func (m module) updateDecl() core.ToolDecl {
 		Description: "Update fields on a Jira issue. Bodies are written in markdown. " +
 			"Which fields are accepted depends on the server's enabled capabilities. " +
 			"Omitted fields are left unchanged, and an empty string counts as omitted: " +
-			"this tool cannot clear a field, unassign an issue, or remove a version.",
+			"this tool cannot clear a field, unassign an issue, or remove a version." + descNotAuthorized,
 		Schema: func(c core.Caps) *jsonschema.Schema {
 			// Every identifier is a string. The SDK re-marshals arguments
 			// through map[string]any, so a JSON number would lose precision

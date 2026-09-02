@@ -64,7 +64,7 @@ func (m module) createPageDecl() core.ToolDecl {
 	return core.ToolDecl{
 		Name:        "confluence_create_page",
 		Actions:     []core.Action{core.ActionWrite},
-		Description: "Create a Confluence page. The body is written in markdown.",
+		Description: "Create a Confluence page. The body is written in markdown." + notAuthorizedNotice,
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
 				fieldSpace:  boundedProp("Space key, e.g. DOCS.", maxSpaceKeyLen),
@@ -170,7 +170,9 @@ func (m module) handleCreatePage(ctx context.Context, raw json.RawMessage) (any,
 	if err := m.client.Do(ctx, http.MethodPost, "/wiki/api/v2/pages", nil, body, &res); err != nil {
 		return nil, err
 	}
-	return map[string]any{fieldID: res.ID, fieldTitle: res.Title, fieldSpace: space}, nil
+	// The title comes back from Confluence, which may have normalised what was
+	// sent, so it is treated as the read path treats a title.
+	return map[string]any{fieldID: res.ID, fieldTitle: markup.SafeText(res.Title), fieldSpace: space}, nil
 }
 
 func (m module) updatePageDecl() core.ToolDecl {
@@ -180,7 +182,7 @@ func (m module) updatePageDecl() core.ToolDecl {
 		Description: "Replace a Confluence page's body. Destructive: the previous body is " +
 			"superseded, though Confluence keeps it in page history. Pass the version " +
 			"returned by confluence_get_page to be sure nobody else edited the page in " +
-			"the meantime.",
+			"the meantime." + notAuthorizedNotice,
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
 				fieldID:    idProp("Numeric page id, sent as a string."),
@@ -317,14 +319,17 @@ func (m module) handleUpdatePage(ctx context.Context, raw json.RawMessage) (any,
 	if res.Version != nil && res.Version.Number > 0 {
 		written = res.Version.Number
 	}
-	return map[string]any{fieldID: res.ID, fieldTitle: title, fieldVersion: written}, nil
+	// title is either the caller's own or the current one read back from
+	// Confluence; the second is third-party text, and telling them apart here
+	// would buy nothing over treating both as the read path does.
+	return map[string]any{fieldID: res.ID, fieldTitle: markup.SafeText(title), fieldVersion: written}, nil
 }
 
 func (m module) commentDecl() core.ToolDecl {
 	return core.ToolDecl{
 		Name:        "confluence_comment",
 		Actions:     []core.Action{core.ActionWrite},
-		Description: "Add a footer comment to a Confluence page. The body is written in markdown.",
+		Description: "Add a footer comment to a Confluence page. The body is written in markdown." + notAuthorizedNotice,
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
 				fieldPageID: idProp("Numeric page id, sent as a string."),

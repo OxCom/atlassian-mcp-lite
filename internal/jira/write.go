@@ -22,7 +22,7 @@ func (m module) commentDecl() core.ToolDecl {
 	return core.ToolDecl{
 		Name:        "jira_comment",
 		Actions:     []core.Action{core.ActionWrite},
-		Description: "Add a comment to a Jira issue. The body is written in markdown.",
+		Description: "Add a comment to a Jira issue. The body is written in markdown." + descNotAuthorized,
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
 				fieldKey:  {Type: typeString, Description: descIssueKey},
@@ -96,7 +96,7 @@ func (m module) transitionDecl() core.ToolDecl {
 		// rules and post-functions that no later transition undoes.
 		Actions: []core.Action{core.ActionDestructive},
 		Description: "Move a Jira issue to another status. Destructive: a workflow move can be " +
-			"one-way and can trigger notifications and automation.",
+			"one-way and can trigger notifications and automation." + descNotAuthorized,
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
 				fieldKey: {Type: typeString, Description: descIssueKey},
@@ -206,7 +206,10 @@ func (m module) handleTransition(ctx context.Context, raw json.RawMessage) (any,
 	if err := m.client.Do(ctx, http.MethodPost, path, nil, body, nil); err != nil {
 		return nil, err
 	}
-	return map[string]any{fieldKey: key, fieldStatus: target.To.Name, "transitionId": target.ID}, nil
+	// The status name is third-party text — a workflow administrator wrote it —
+	// so it leaves through the same scalar treatment as every name a read tool
+	// returns.
+	return map[string]any{fieldKey: key, fieldStatus: markup.SafeText(target.To.Name), "transitionId": target.ID}, nil
 }
 
 // authorizeWrite refuses a write the operator's allowlist does not permit.

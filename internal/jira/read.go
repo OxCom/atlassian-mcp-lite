@@ -128,7 +128,9 @@ func (m module) handleSearch(ctx context.Context, raw json.RawMessage) (any, err
 
 	issues := make([]map[string]any, 0, len(res.Issues))
 	for _, i := range res.Issues {
-		issues = append(issues, m.flatten(i.Key, i.Fields))
+		// v3: unknown text fields arrive as ADF, so string leaves get SafeText
+		// rather than a wiki conversion.
+		issues = append(issues, m.flatten(i.Key, i.Fields, false))
 	}
 
 	out := map[string]any{"issues": issues, "returned": len(issues)}
@@ -222,7 +224,9 @@ func (m module) handleGet(ctx context.Context, raw json.RawMessage) (any, error)
 	if responseKey == "" {
 		responseKey = key
 	}
-	out := m.flatten(responseKey, res.Fields)
+	// v2: unknown text fields arrive as wiki markup, so string leaves go
+	// through FromWiki, which is also what vets their link targets.
+	out := m.flatten(responseKey, res.Fields, true)
 	if missing := unavailableFields(fields, []map[string]any{out}); len(missing) > 0 {
 		out["unavailable_fields"] = missing
 	}
@@ -248,8 +252,22 @@ func (m module) handleGet(ctx context.Context, raw json.RawMessage) (any, error)
 //     cannot become the way around the reducers that drop embedded email
 //     addresses. A shape this code cannot read is still data, and null would
 //     assert the field is empty.
-func (m module) flatten(key string, fields map[string]json.RawMessage) map[string]any {
+//
+// text is how a string this code does not recognise is treated, and it differs
+// by endpoint. On the v2 path (jira_get) an unknown text field holds wiki
+// markup, so it goes through markup.FromWiki, which is also what vets its link
+// targets — without the conversion a "javascript:" destination planted in a
+// custom field reached the model verbatim, which is exactly what
+// safeLinkTarget exists to prevent for the fields this code does know. On the
+// v3 path (jira_search) the same field arrives as ADF, a format this project
+// deliberately does not parse, so its string leaves get markup.SafeText: no
+// conversion, but control characters gone and markdown structure disarmed.
+func (m module) flatten(key string, fields map[string]json.RawMessage, wiki bool) map[string]any {
 	out := map[string]any{fieldKey: key}
+	text := markup.SafeText
+	if wiki {
+		text = markup.FromWiki
+	}
 	for name, raw := range fields {
 		// The rename happens first so every later decision, including the null
 		// case, keys the value by the name the caller actually asked for.
@@ -271,6 +289,14 @@ func (m module) flatten(key string, fields map[string]json.RawMessage) map[strin
 			if json.Unmarshal(raw, &s) == nil {
 				v, ok = markup.FromWiki(s), true
 			}
+		case fieldSummary:
+			// Plain text, not markup: Jira renders a summary literally, and
+			// jira_update writes one back literally, so a converter would be
+			// both wrong and lossy. SafeText is the scalar treatment.
+			var s string
+			if json.Unmarshal(raw, &s) == nil {
+				v, ok = markup.SafeText(s), true
+			}
 		case "comment":
 			v, ok = commentValue(raw)
 		case "parent":
@@ -284,17 +310,19 @@ func (m module) flatten(key string, fields map[string]json.RawMessage) map[strin
 		default:
 			var g any
 			if json.Unmarshal(raw, &g) == nil {
-				v, ok = scrubPassthrough(g), true
+				v, ok = convertText(scrubPassthrough(g), text), true
 			}
 		}
 		if !ok {
 			// A known field in a shape the reducer could not read is still
-			// passed through, but as decoded and scrubbed JSON: the shape was
-			// unexpected, which is no reason to let an embedded user through
-			// with the email the reducer would have dropped.
+			// passed through, but as decoded, scrubbed and converted JSON: the
+			// shape was unexpected, which is no reason to let an embedded user
+			// through with the email the reducer would have dropped, nor to let
+			// an unconverted string through with the link syntax the converter
+			// would have vetted.
 			var g any
 			if json.Unmarshal(raw, &g) == nil {
-				out[name] = scrubPassthrough(g)
+				out[name] = convertText(scrubPassthrough(g), text)
 			} else {
 				out[name] = raw
 			}
@@ -340,6 +368,31 @@ func scrubPassthrough(v any) any {
 	return v
 }
 
+// convertText applies text to every string leaf of a decoded JSON value. It is
+// the companion of scrubPassthrough: that one decides what a field this code
+// does not understand may still carry, this one decides what shape its text
+// reaches the model in. Neither is a substitute for the other — a scrubbed
+// custom field still held raw wiki markup whose links had never been vetted.
+//
+// The walk mutates maps and slices in place and returns the value, so a string
+// leaf can be replaced by its converted form; the value was decoded for this
+// call alone.
+func convertText(v any, text func(string) string) any {
+	switch t := v.(type) {
+	case string:
+		return text(t)
+	case map[string]any:
+		for k, child := range t {
+			t[k] = convertText(child, text)
+		}
+	case []any:
+		for i, child := range t {
+			t[i] = convertText(child, text)
+		}
+	}
+	return v
+}
+
 // commentValue reduces Jira's comment container. A comment body is wiki markup
 // written by anyone who can comment on the issue — as untrusted as the
 // description — so it goes through FromWiki for the same reason: without the
@@ -361,14 +414,28 @@ func commentValue(raw json.RawMessage) (any, bool) {
 	}
 	list, isList := container["comments"].([]any)
 	if !isList {
-		return container, true
+		return convertText(container, markup.SafeText), true
 	}
-	for _, item := range list {
+	// Two treatments in one container: a body is wiki markup and goes through
+	// FromWiki, while every other string here — an author's display name, a
+	// timestamp, a visibility role — is a plain scalar and goes through
+	// SafeText. The bodies are lifted out before the scalar walk and put back
+	// after it, because running SafeText over a wiki body first would escape
+	// the very syntax FromWiki has to read.
+	bodies := make(map[int]string, len(list))
+	for i, item := range list {
 		c, isMap := item.(map[string]any)
 		if !isMap {
 			continue
 		}
 		if body, isText := c["body"].(string); isText {
+			bodies[i] = body
+			delete(c, "body")
+		}
+	}
+	convertText(container, markup.SafeText)
+	for i, body := range bodies {
+		if c, isMap := list[i].(map[string]any); isMap {
 			c["body"] = markup.FromWiki(body)
 		}
 	}
@@ -415,11 +482,16 @@ func namedValue(raw json.RawMessage) (any, bool) {
 	if json.Unmarshal(raw, &v) != nil {
 		return nil, false
 	}
+	// A name is third-party text: a status, issue type, priority or resolution
+	// is named by whoever administers the site. It is a plain scalar and a
+	// round-trip input — jira_transition takes a status name — so SafeText is
+	// the treatment, not a converter and not a blanket escape.
+	name := markup.SafeText(v.Name)
 	switch {
-	case v.Key != "" && v.Name != "":
-		return v.Key + " (" + v.Name + ")", true
-	case v.Name != "":
-		return v.Name, true
+	case v.Key != "" && name != "":
+		return v.Key + " (" + name + ")", true
+	case name != "":
+		return name, true
 	case v.Key != "":
 		return v.Key, true
 	}
@@ -440,9 +512,10 @@ func parentValue(raw json.RawMessage) (any, bool) {
 	if json.Unmarshal(raw, &v) != nil {
 		return nil, false
 	}
+	summary := markup.SafeText(v.Fields.Summary)
 	switch {
-	case v.Key != "" && v.Fields.Summary != "":
-		return v.Key + " (" + v.Fields.Summary + ")", true
+	case v.Key != "" && summary != "":
+		return v.Key + " (" + summary + ")", true
 	case v.Key != "":
 		return v.Key, true
 	}
@@ -461,9 +534,12 @@ func personValue(raw json.RawMessage) (any, bool) {
 	if json.Unmarshal(raw, &v) != nil {
 		return nil, false
 	}
+	// A display name is chosen by the person it names, so it is third-party
+	// text like any other. The account id is a site-generated identifier and
+	// needs no treatment.
 	switch {
 	case v.DisplayName != "":
-		return v.DisplayName, true
+		return markup.SafeText(v.DisplayName), true
 	case v.AccountID != "":
 		return v.AccountID, true
 	}
@@ -480,7 +556,7 @@ func namedList(raw json.RawMessage) (any, bool) {
 	out := make([]string, 0, len(vs))
 	for _, v := range vs {
 		if v.Name != "" {
-			out = append(out, v.Name)
+			out = append(out, markup.SafeText(v.Name))
 		}
 	}
 	return out, true
