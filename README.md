@@ -56,7 +56,7 @@ right permissions, registers the server in your client, and tells you where the
 config lives. You type the API token yourself; the assistant never sees it. See
 [`docs/install.md`](docs/install.md) for what the assistant is instructed to do.
 
-**By hand.** Create the config file, lock it down, build the image:
+**By hand.** Create the config file, lock it down, pull the image:
 
 ```bash
 mkdir -p ~/.config/atlassian-mcp-lite
@@ -67,8 +67,15 @@ ATLAS_TOKEN=paste-your-api-token-here
 EOF
 chmod 600 ~/.config/atlassian-mcp-lite/env
 
-make image
+docker pull ghcr.io/oxcom/atlassian-mcp-lite:latest
 ```
+
+The image is published at
+[ghcr.io/oxcom/atlassian-mcp-lite](https://github.com/OxCom/atlassian-mcp-lite/pkgs/container/atlassian-mcp-lite)
+— public, so no registry login is needed. Pin a `vX.Y.Z` tag instead of
+`latest` if you would rather upgrade deliberately. To run an unreleased commit,
+clone the repository and `make image` instead, which produces
+`atlassian-mcp-lite:local`.
 
 That is a complete configuration. With nothing else set, the server starts
 with the **read tools of both products** and nothing that can modify your
@@ -90,7 +97,7 @@ because it must own stdin and stdout:
         "-e", "ATLAS_ENV_FILE=/config/env",
         "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true",
-        "atlassian-mcp-lite:local"
+        "ghcr.io/oxcom/atlassian-mcp-lite:latest"
       ]
     }
   }

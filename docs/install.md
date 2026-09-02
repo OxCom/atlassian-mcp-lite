@@ -148,9 +148,33 @@ Then tell the user, verbatim:
 > written, and do not set the same key twice in the file — a duplicate is an
 > error, not last-one-wins.
 
-## Step 5 — Build or pull the image
+## Step 5 — Pull the image
 
-From a clone of the repository:
+The released image is published to the GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/oxcom/atlassian-mcp-lite:latest
+```
+
+Prefer a version tag over `latest` so an upgrade is a deliberate act rather
+than something that happens on the next `docker pull`. The available tags are
+listed at
+<https://github.com/OxCom/atlassian-mcp-lite/pkgs/container/atlassian-mcp-lite>;
+ask the user which they want, and default to the newest `vX.Y.Z` shown there:
+
+```bash
+docker pull ghcr.io/oxcom/atlassian-mcp-lite:vX.Y.Z
+```
+
+The registry path must be lowercase — `oxcom`, not `OxCom` — even though the
+GitHub owner is capitalised. No login is needed for a public package. If the
+pull fails with `denied`, the client is sending stale credentials for
+`ghcr.io`; `docker logout ghcr.io` and retry.
+
+Steps 6 and 7 below write `:latest`; substitute the tag chosen here.
+
+**Building from source instead** is only needed to run an unreleased commit, or
+where pulling from `ghcr.io` is blocked:
 
 ```bash
 git clone https://github.com/OxCom/atlassian-mcp-lite
@@ -166,7 +190,9 @@ make image          # produces atlassian-mcp-lite:local
 Add this server entry to the client's MCP configuration. Substitute the user's
 home directory for `/home/YOUR_USER` and their uid and gid (`id -u`, `id -g`)
 for `1000:1000`; the container must run as the file's owner because the file is
-readable by its owner only.
+readable by its owner only. The last argument is the image tag from Step 5 —
+`ghcr.io/oxcom/atlassian-mcp-lite:vX.Y.Z`, or `atlassian-mcp-lite:local` if it
+was built from source.
 
 ```json
 {
@@ -180,7 +206,7 @@ readable by its owner only.
         "-e", "ATLAS_ENV_FILE=/config/env",
         "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true",
-        "atlassian-mcp-lite:local"
+        "ghcr.io/oxcom/atlassian-mcp-lite:latest"
       ]
     }
   }
@@ -204,7 +230,8 @@ the client:
 ```bash
 docker run --rm -i --user "$(id -u):$(id -g)" \
   -v ~/.config/atlassian-mcp-lite/env:/config/env:ro \
-  -e ATLAS_ENV_FILE=/config/env atlassian-mcp-lite:local </dev/null
+  -e ATLAS_ENV_FILE=/config/env \
+  ghcr.io/oxcom/atlassian-mcp-lite:latest </dev/null
 ```
 
 With the placeholder token still in place this exits with a configuration
