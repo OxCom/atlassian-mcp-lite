@@ -56,7 +56,9 @@ right permissions, registers the server in your client, and tells you where the
 config lives. You type the API token yourself; the assistant never sees it. See
 [`docs/install.md`](docs/install.md) for what the assistant is instructed to do.
 
-**By hand.** Create the config file, lock it down, pull the image:
+**By hand.** Create the config file, lock it down, then choose how the server
+runs — a container image or a single native binary. Both are the same server;
+pick whichever your machine and MCP client make easier.
 
 ```bash
 mkdir -p ~/.config/atlassian-mcp-lite
@@ -66,7 +68,16 @@ ATLAS_EMAIL=you@example.com
 ATLAS_TOKEN=paste-your-api-token-here
 EOF
 chmod 600 ~/.config/atlassian-mcp-lite/env
+```
 
+On Windows the config file goes to `%LOCALAPPDATA%\atlassian-mcp-lite\env` and
+is restricted with `icacls` instead — neither the mode check nor the owner
+check runs there, so the server warns at startup and leaves it to you. See
+[`docs/install.md`](docs/install.md).
+
+### Option A — container image
+
+```bash
 docker pull ghcr.io/oxcom/atlassian-mcp-lite:latest
 ```
 
@@ -76,6 +87,53 @@ The image is published at
 `latest` if you would rather upgrade deliberately. To run an unreleased commit,
 clone the repository and `make image` instead, which produces
 `atlassian-mcp-lite:local`.
+
+### Option B — native binary, no Docker
+
+Every tagged release attaches a static binary per platform and one
+`SHA256SUMS` over all of them, at
+[**Releases**](https://github.com/OxCom/atlassian-mcp-lite/releases/latest):
+
+| Platform | Asset |
+|---|---|
+| Linux, Intel/AMD 64-bit | `atlassian-mcp-lite_linux_amd64` |
+| Linux, ARM 64-bit | `atlassian-mcp-lite_linux_arm64` |
+| macOS, Apple silicon | `atlassian-mcp-lite_darwin_arm64` |
+| macOS, Intel | `atlassian-mcp-lite_darwin_amd64` |
+| Windows, Intel/AMD 64-bit | `atlassian-mcp-lite_windows_amd64.exe` |
+
+The binary is CGO-free and statically linked: no runtime, no shared libraries,
+no install step beyond putting it somewhere and marking it executable. Verify
+the checksum before you run it — that file is what will hold your token.
+
+```bash
+VER=vX.Y.Z
+ASSET=atlassian-mcp-lite_linux_amd64
+BASE=https://github.com/OxCom/atlassian-mcp-lite/releases/download/$VER
+
+curl -fLO "$BASE/$ASSET"
+curl -fLO "$BASE/SHA256SUMS"
+sha256sum --ignore-missing -c SHA256SUMS
+install -m 0755 "$ASSET" ~/.local/bin/atlassian-mcp-lite
+```
+
+Windows, PowerShell:
+
+```powershell
+$Ver = "vX.Y.Z"
+$Base = "https://github.com/OxCom/atlassian-mcp-lite/releases/download/$Ver"
+$Dir = "$env:LOCALAPPDATA\atlassian-mcp-lite"
+New-Item -ItemType Directory -Force $Dir | Out-Null
+Invoke-WebRequest "$Base/atlassian-mcp-lite_windows_amd64.exe" -OutFile "$Dir\atlassian-mcp-lite.exe"
+Invoke-WebRequest "$Base/SHA256SUMS" -OutFile "$env:TEMP\SHA256SUMS"
+(Get-FileHash "$Dir\atlassian-mcp-lite.exe" -Algorithm SHA256).Hash.ToLower()
+Select-String -Path "$env:TEMP\SHA256SUMS" -Pattern "windows_amd64"
+```
+
+The binaries are unsigned. On macOS use `curl` rather than a browser, or clear
+the quarantine attribute with `xattr -d com.apple.quarantine`; on Windows
+SmartScreen may warn on first run. The checksum, not the absence of a warning,
+is what establishes provenance. `make dist` builds the same set locally.
 
 That is a complete configuration. With nothing else set, the server starts
 with the **read tools of both products** and nothing that can modify your
@@ -108,6 +166,26 @@ Replace `1000:1000` with your own uid and gid (`id -u` and `id -g`): the file
 is readable by its owner only, so the container must run as that owner. `-i`
 is required: without it the container gets no stdin and the client sees an
 immediate EOF.
+
+With the binary the entry is shorter — no mount, no uid to match:
+
+```json
+{
+  "mcpServers": {
+    "atlassian": {
+      "command": "/home/YOUR_USER/.local/bin/atlassian-mcp-lite",
+      "env": {
+        "ATLAS_ENV_FILE": "/home/YOUR_USER/.config/atlassian-mcp-lite/env"
+      }
+    }
+  }
+}
+```
+
+`command` must be an absolute path, and the token belongs in the file named by
+`ATLAS_ENV_FILE`, never in this `env` block — the client config is not the file
+whose permissions the server checks. `docs/install.md` has the per-client
+config locations for macOS, Windows and Linux, and a troubleshooting table.
 
 ## What is enabled by default
 

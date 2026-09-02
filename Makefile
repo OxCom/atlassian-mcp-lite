@@ -83,11 +83,15 @@ cover: ## per-function coverage report
 build: ## build the binary into ./bin
 	$(DC) build
 
+.PHONY: dist
+dist: ## cross-compile release binaries + SHA256SUMS into ./dist
+	$(DC) dist
+
 .PHONY: image
 image: ## build the production container image
 	DOCKER_BUILDKIT=1 docker compose $(COMPOSE_FILES) build atlassian-mcp-lite
 
 .PHONY: clean
 clean: ## remove build output and caches
-	rm -rf bin coverage.out
+	rm -rf bin dist coverage.out
 	docker compose $(COMPOSE_FILES) down -v

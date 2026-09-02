@@ -107,11 +107,14 @@ Do not ask for the token. Tell the user how to create one:
 
 ## Step 4 — Write the config file
 
-Location, unless the user asks for another:
+Location, unless the user asks for another. Ask which OS the user is on rather
+than assuming; the rest of this page writes the Linux path:
 
-```text
-~/.config/atlassian-mcp-lite/env
-```
+| OS | Config file |
+|---|---|
+| Linux | `~/.config/atlassian-mcp-lite/env` |
+| macOS | `~/.config/atlassian-mcp-lite/env` |
+| Windows | `%LOCALAPPDATA%\atlassian-mcp-lite\env` |
 
 Write it with a placeholder token, then lock it down:
 
@@ -137,6 +140,30 @@ EOF
 chmod 600 ~/.config/atlassian-mcp-lite/env
 ```
 
+On **Windows** there is no `chmod`, and the server cannot check the file for
+you — neither the mode check nor the owner check runs there. Write the file and
+restrict it explicitly, then relay the result to the user:
+
+```powershell
+$Dir = "$env:LOCALAPPDATA\atlassian-mcp-lite"
+New-Item -ItemType Directory -Force $Dir | Out-Null
+$Env = "$Dir\env"
+
+# Same contents as the Unix file above.
+Set-Content -Path $Env -Encoding ascii -Value @'
+ATLAS_BASE_URL=https://your-domain.atlassian.net
+ATLAS_EMAIL=you@example.com
+ATLAS_TOKEN=REPLACE_WITH_YOUR_API_TOKEN
+'@
+
+# Break inheritance, then grant the current user alone.
+icacls $Env /inheritance:r /grant:r "$($env:USERNAME):(R,W)"
+```
+
+The server prints a startup warning on Windows naming both skipped checks and
+suggesting that `icacls` line. Relay the warning; do not present a clean start
+as proof the file is private.
+
 Fill in the answers from Steps 1–3:
 
 - a product not selected in Step 1 → `ATLAS_<PRODUCT>_READ=false`;
@@ -152,7 +179,21 @@ Then tell the user, verbatim:
 > written, and do not set the same key twice in the file — a duplicate is an
 > error, not last-one-wins.
 
-## Step 5 — Pull the image
+## Step 5 — Get the server: container image or native binary
+
+Ask one single-select question before doing anything here:
+
+> How should the server run?
+>
+> - ( ) Container image (recommended) — needs Docker; the image is minimal,
+>       read-only, unprivileged, and upgrades are a `docker pull`.
+> - ( ) Native binary — no Docker on the machine, or a client that cannot
+>       launch containers. One static file, no runtime dependencies.
+
+Both paths end at the same server. The difference is only what the MCP client
+launches, and Step 6 has a config block for each.
+
+### Option A — container image
 
 The released image is published to the GitHub Container Registry:
 
@@ -177,16 +218,86 @@ pull fails with `denied`, the client is sending stale credentials for
 
 Steps 6 and 7 below write `:latest`; substitute the tag chosen here.
 
-**Building from source instead** is only needed to run an unreleased commit, or
-where pulling from `ghcr.io` is blocked:
+### Option B — native binary
+
+Every tagged release attaches a static, dependency-free binary per platform
+plus one `SHA256SUMS` covering all of them. Browse them at
+<https://github.com/OxCom/atlassian-mcp-lite/releases/latest>.
+
+| Platform | Asset |
+|---|---|
+| Linux, Intel/AMD 64-bit | `atlassian-mcp-lite_linux_amd64` |
+| Linux, ARM 64-bit | `atlassian-mcp-lite_linux_arm64` |
+| macOS, Apple silicon | `atlassian-mcp-lite_darwin_arm64` |
+| macOS, Intel | `atlassian-mcp-lite_darwin_amd64` |
+| Windows, Intel/AMD 64-bit | `atlassian-mcp-lite_windows_amd64.exe` |
+| checksums | `SHA256SUMS` |
+
+Ask the user which platform they are on rather than guessing, then download,
+**verify the checksum**, and install. Verification is not optional: the binary
+is what holds the token at runtime.
+
+Linux and macOS:
+
+```bash
+VER=vX.Y.Z          # the release tag
+ASSET=atlassian-mcp-lite_linux_amd64      # from the table above
+BASE=https://github.com/OxCom/atlassian-mcp-lite/releases/download/$VER
+
+curl -fLO "$BASE/$ASSET"
+curl -fLO "$BASE/SHA256SUMS"
+sha256sum --ignore-missing -c SHA256SUMS   # macOS: shasum -a 256 --ignore-missing -c SHA256SUMS
+
+mkdir -p ~/.local/bin
+install -m 0755 "$ASSET" ~/.local/bin/atlassian-mcp-lite
+```
+
+On macOS the binary is unsigned and unnotarised, so Gatekeeper quarantines a
+download from a browser. `curl` does not set the quarantine attribute, which is
+why the commands above use it. If the user downloaded through a browser
+instead, clear it explicitly:
+
+```bash
+xattr -d com.apple.quarantine ~/.local/bin/atlassian-mcp-lite
+```
+
+Windows (PowerShell):
+
+```powershell
+$Ver   = "vX.Y.Z"
+$Asset = "atlassian-mcp-lite_windows_amd64.exe"
+$Base  = "https://github.com/OxCom/atlassian-mcp-lite/releases/download/$Ver"
+
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\atlassian-mcp-lite" | Out-Null
+Invoke-WebRequest "$Base/$Asset" -OutFile "$env:LOCALAPPDATA\atlassian-mcp-lite\atlassian-mcp-lite.exe"
+Invoke-WebRequest "$Base/SHA256SUMS" -OutFile "$env:TEMP\SHA256SUMS"
+
+# Compare the hash against the line for this asset in SHA256SUMS.
+(Get-FileHash "$env:LOCALAPPDATA\atlassian-mcp-lite\atlassian-mcp-lite.exe" -Algorithm SHA256).Hash.ToLower()
+Select-String -Path "$env:TEMP\SHA256SUMS" -Pattern $Asset
+```
+
+The two values must match. SmartScreen may warn on first run because the
+executable is unsigned; the checksum is what establishes provenance here, not
+the absence of a warning.
+
+The binary reads its configuration from the environment, so the MCP client must
+pass `ATLAS_ENV_FILE` — Step 6 does that. It opens no file other than that one
+and speaks MCP on stdin and stdout.
+
+### Building from source instead
+
+Only needed to run an unreleased commit, or where both `ghcr.io` and the
+release assets are blocked:
 
 ```bash
 git clone https://github.com/OxCom/atlassian-mcp-lite
 cd atlassian-mcp-lite
-make image          # produces atlassian-mcp-lite:local
+make image          # produces the image atlassian-mcp-lite:local
+make dist           # produces every release binary in ./dist, with SHA256SUMS
 ```
 
-`make image` needs only Docker on the host. Behind a corporate proxy see
+Both need only Docker on the host. Behind a corporate proxy see
 `docs/development.md`.
 
 ## Step 6 — Register the server in the MCP client
@@ -217,14 +328,65 @@ was built from source.
 }
 ```
 
-Where that goes depends on the client:
+**If Step 5 chose the native binary**, the client launches the binary directly
+and passes the config path in the environment. There is no bind mount and no
+uid to match — the process already runs as the user:
+
+```json
+{
+  "mcpServers": {
+    "atlassian": {
+      "command": "/home/YOUR_USER/.local/bin/atlassian-mcp-lite",
+      "env": {
+        "ATLAS_ENV_FILE": "/home/YOUR_USER/.config/atlassian-mcp-lite/env"
+      }
+    }
+  }
+}
+```
+
+On Windows use the installed path and forward slashes or doubled backslashes,
+both of which JSON accepts:
+
+```json
+{
+  "mcpServers": {
+    "atlassian": {
+      "command": "C:/Users/YOUR_USER/AppData/Local/atlassian-mcp-lite/atlassian-mcp-lite.exe",
+      "env": {
+        "ATLAS_ENV_FILE": "C:/Users/YOUR_USER/AppData/Local/atlassian-mcp-lite/env"
+      }
+    }
+  }
+}
+```
+
+`command` must be an absolute path. A bare name works only if the directory is
+on the `PATH` of the process that launches the client, which for a desktop app
+is often not the shell's `PATH`.
+
+Do not put `ATLAS_TOKEN` in this `env` block. The MCP client config is a
+world-readable file in most clients, and it is not the config file whose
+permissions the server checks.
+
+Where that goes depends on the client. Every one of these takes the same
+`mcpServers` object; only the file differs.
 
 | Client | Location |
 |---|---|
-| Claude Code | `claude mcp add-json atlassian '<the "atlassian" object above>'` or `.mcp.json` in the project |
-| Claude Desktop | `claude_desktop_config.json` in the app's config directory |
-| Cursor | `.cursor/mcp.json` in the project or `~/.cursor/mcp.json` |
+| Claude Code | `claude mcp add-json atlassian '<the "atlassian" object above>'`, or `.mcp.json` in the project root for a shared checkout, or `~/.claude.json` for every project |
+| Claude Desktop — macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Claude Desktop — Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Claude Desktop — Linux | `~/.config/Claude/claude_desktop_config.json` |
+| Cursor | `.cursor/mcp.json` in the project, or `~/.cursor/mcp.json` globally |
+| VS Code / GitHub Copilot | `.vscode/mcp.json` in the workspace, or the user `mcp.json` via **MCP: Open User Configuration**. Copilot agent mode is stdio-only, which both options above are |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+| Zed | `settings.json`, under `context_servers` rather than `mcpServers` |
 | Other | the client's MCP server list; the shape above is the common one |
+
+Add the entry, do not replace the file: these files usually hold other servers
+already. Restart the client afterwards — none of them reload MCP config while
+running.
 
 ### Networks that intercept TLS
 
@@ -266,7 +428,34 @@ docker run --rm -i --user "$(id -u):$(id -g)" \
   ghcr.io/oxcom/atlassian-mcp-lite:latest </dev/null
 ```
 
-Add the CA arguments from Step 6 here too if the network intercepts TLS.
+If Step 5 chose the native binary, run that instead — same check, no mount:
+
+```bash
+ATLAS_ENV_FILE=~/.config/atlassian-mcp-lite/env \
+  ~/.local/bin/atlassian-mcp-lite </dev/null
+```
+
+```powershell
+$env:ATLAS_ENV_FILE = "$env:LOCALAPPDATA\atlassian-mcp-lite\env"
+& "$env:LOCALAPPDATA\atlassian-mcp-lite\atlassian-mcp-lite.exe" < $null
+```
+
+Add the CA arguments from Step 6 here too if the network intercepts TLS. For
+the binary the equivalent is `SSL_CERT_FILE` in the environment; on Windows and
+macOS the Go runtime reads the system trust store, so a CA installed there is
+already trusted and nothing extra is needed.
+
+To see the tool list the server actually advertises — the fastest check that
+the capability settings came out as intended — run it under the MCP inspector,
+which needs only Node:
+
+```bash
+npx @modelcontextprotocol/inspector ~/.local/bin/atlassian-mcp-lite
+```
+
+Set `ATLAS_ENV_FILE` in the environment first. With the defaults the inspector
+lists exactly four tools: `jira_search`, `jira_get`, `confluence_search`,
+`confluence_get_page`.
 
 This exits quietly on EOF whether the token is the placeholder or a real one:
 the placeholder clears the minimum token length, and nothing in startup calls
@@ -288,3 +477,48 @@ Finish with this note to the user, adjusted to what was chosen:
 > <https://github.com/OxCom/atlassian-mcp-lite/blob/master/docs/configuration.md>.
 > Restart the MCP client after changing it. Currently enabled: *Jira read,
 > Confluence read* (list what was selected).
+
+## Step 8 — When it does not work
+
+Read the client's MCP log first. An MCP server that fails at startup usually
+shows in the client as "server disconnected" with nothing else; the reason is
+always on the server's stderr, which the client captures.
+
+| Client | Log |
+|---|---|
+| Claude Code | `claude mcp list` shows connection state; run the same command by hand (Step 7) to see stderr |
+| Claude Desktop — macOS | `tail -f ~/Library/Logs/Claude/mcp*.log` |
+| Claude Desktop — Windows | `Get-Content -Wait "$env:APPDATA\Claude\logs\mcp*.log"` |
+| Claude Desktop — Linux | `tail -f ~/.config/Claude/logs/mcp*.log` |
+| Cursor | Output panel, **MCP Logs** channel |
+| VS Code / Copilot | Output panel, **MCP** channel |
+
+Then match the message:
+
+| Symptom | Cause and fix |
+|---|---|
+| `config file ... must be mode 0600 or 0400` | The error names the exact `chmod`. On Windows this check does not run at all — see the warning in Step 4. |
+| `config file ... is a symbolic link` | Write the real file in the user's own home directory. The server refuses a link because its target's owner, not the user, would decide what is read. |
+| `config file ... is owned by uid N` | With Docker, the `--user` argument does not match the file's owner. Use `id -u`/`id -g`. |
+| `ATLAS_TOKEN must be at least 16 characters` | The token was truncated on the way into the file, or the placeholder is still there. |
+| `no capabilities are enabled` | Every class of every product is off. At minimum leave one `ATLAS_<PRODUCT>_READ` unset or `true`. |
+| `401` on the first read | Wrong email, wrong or revoked token, or a token created for a different Atlassian account. Tokens are per account, not per site. |
+| `403` on a read that should work | The account lacks permission on that project or space. This is Atlassian's answer, not the server's — Basic auth carries the full authority of the account and nothing less. |
+| `x509: certificate signed by unknown authority` | TLS interception. See "Networks that intercept TLS" above. |
+| `blocked destination address` | `ATLAS_BASE_URL` resolves to a private, loopback or link-local address. That is refused deliberately; point it at the real site. |
+| Tool missing from the client's list | Its action class is off. A disabled tool is absent from `tools/list` rather than failing when called — check `ATLAS_<PRODUCT>_<CLASS>` and restart the client. |
+| `result exceeds 1 MiB` | Ask for fewer fields or a smaller `limit`. The result is refused rather than truncated, because a cut JSON document cannot be read safely. |
+| Container exits immediately, no output | `-i` is missing from the `docker run` arguments, so the server sees EOF on stdin at once. |
+
+## Upgrading and removing
+
+**Upgrade — image:** `docker pull` the new tag and update the tag in the client
+config if it is pinned. **Upgrade — binary:** download the new asset, verify its
+checksum, and overwrite the installed file. Nothing else changes: the config
+file format is stable and is not touched by an upgrade.
+
+**Remove:** delete the server entry from the client config, delete the config
+file (it holds the token), then `docker rmi ghcr.io/oxcom/atlassian-mcp-lite`
+or delete the binary. Finally **revoke the API token** at
+<https://id.atlassian.com/manage-profile/security/api-tokens> — deleting the
+file does not invalidate it.

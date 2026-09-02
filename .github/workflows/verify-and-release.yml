@@ -18,7 +18,7 @@ env:
 #   security  gitleaks | trufflehog | govulncheck | gosec | tidy
 #   lint      golangci-lint | fmt | vet
 #   test      race + coverage
-#   build     linux/amd64 | linux/arm64 | darwin/arm64 | windows/amd64   (tags only)
+#   build     linux/amd64 | linux/arm64 | darwin/{arm64,amd64} | windows/amd64  (tags only)
 #   release   image + GitHub release                                     (tags only)
 #
 # Jobs inside a stage run in parallel and are independent of one another, so a
@@ -196,6 +196,9 @@ jobs:
             goarch: arm64
           - goos: darwin
             goarch: arm64
+          # Intel Macs are still in use and cannot run a darwin/arm64 binary.
+          - goos: darwin
+            goarch: amd64
           - goos: windows
             goarch: amd64
     steps:
@@ -220,10 +223,6 @@ jobs:
           go build -trimpath \
             -ldflags="-s -w -X github.com/OxCom/atlassian-mcp-lite/internal/core.Version=${GITHUB_REF_NAME}" \
             -o "dist/${out}" ./cmd/atlassian-mcp-lite
-      - name: checksums
-        run: |
-          cd dist
-          sha256sum * > "SHA256SUMS_${{ matrix.goos }}_${{ matrix.goarch }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -280,6 +279,14 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
+      # One checksum file over every artifact, not one per platform: a user
+      # verifying a download should need a single file, and `sha256sum -c`
+      # against it reports the other entries as missing rather than failing.
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum ./* > SHA256SUMS
+          cat SHA256SUMS
       - name: create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

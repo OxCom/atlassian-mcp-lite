@@ -28,6 +28,42 @@ services:
     <<: *go
     command: go build -trimpath -ldflags="-s -w" -o /src/bin/atlassian-mcp-lite ./cmd/atlassian-mcp-lite
 
+  # Cross-compiled release binaries, the same set the tagged CI build
+  # publishes, plus one SHA256SUMS over all of them. VERSION is stamped into
+  # internal/core.Version, not package main: the linker silently ignores -X
+  # for a symbol that does not exist.
+  #
+  # Every $$ is a literal dollar for the shell. Compose substitutes ${...}
+  # itself before the container ever sees the script, and ${VERSION} below is
+  # deliberately the one place where that is wanted.
+  dist:
+    <<: *go
+    environment:
+      CGO_ENABLED: "0"
+      GOFLAGS: -buildvcs=false
+      VERSION: ${VERSION:-dev}
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        rm -rf /src/dist
+        mkdir -p /src/dist
+        for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+          GOOS=$${target%/*}
+          GOARCH=$${target#*/}
+          export GOOS GOARCH
+          out="atlassian-mcp-lite_$${GOOS}_$${GOARCH}"
+          if [ "$$GOOS" = windows ]; then out="$${out}.exe"; fi
+          echo "building $${out}"
+          go build -trimpath \
+            -ldflags="-s -w -X github.com/OxCom/atlassian-mcp-lite/internal/core.Version=$${VERSION}" \
+            -o "/src/dist/$${out}" ./cmd/atlassian-mcp-lite
+        done
+        cd /src/dist
+        sha256sum ./* > SHA256SUMS
+        cat SHA256SUMS
+
   # -race is the default now that the image has a C toolchain. CGO is enabled
   # for this service only; every build path stays CGO-free so the binary can
   # run in a scratch container.

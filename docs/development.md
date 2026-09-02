@@ -14,6 +14,7 @@ make vet      # go vet
 make tidy     # fail if go.mod or go.sum would change
 make cover    # per-function coverage report
 make build    # binary into ./bin
+make dist     # cross-compiled release binaries + SHA256SUMS into ./dist
 make image    # production container image
 ```
 
