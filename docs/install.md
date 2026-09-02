@@ -34,8 +34,12 @@ and follow docs/install.md exactly.
   and suggesting an `icacls` command. Relay that command rather than treating a
   clean startup as proof the file is private.
 - **Do not run the server against the real site to "test" it** until the user
-  has filled in the token. A startup check with placeholders is fine and is
-  expected to fail with a clear configuration error.
+  has filled in the token. A startup check with placeholders is fine, but read
+  what it proves: it validates the config file's mode, ownership and required
+  keys, and the placeholder token below is long enough to clear the minimum
+  length, so the check exits quietly rather than reporting an error. A quiet
+  exit therefore says the file is well formed, not that the credentials work.
+  Only a real call to Atlassian tests those.
 
 ## Step 1 — Which products?
 
@@ -222,6 +226,34 @@ Where that goes depends on the client:
 | Cursor | `.cursor/mcp.json` in the project or `~/.cursor/mcp.json` |
 | Other | the client's MCP server list; the shape above is the common one |
 
+### Networks that intercept TLS
+
+The image carries the public root certificates only. On a corporate network
+that terminates and re-signs TLS, every request to Atlassian fails with:
+
+```text
+tls: failed to verify certificate: x509: certificate signed by unknown authority
+```
+
+The fix is to mount a trust bundle that contains **both** the public roots and
+the company CA, and to name it through `SSL_CERT_FILE`, which Go reads directly
+— two extra arguments in the entry above:
+
+```json
+        "-v", "/etc/ssl/certs/ca-certificates.crt:/etc/ssl/corp/bundle.crt:ro",
+        "-e", "SSL_CERT_FILE=/etc/ssl/corp/bundle.crt",
+```
+
+On a Linux host whose CA is already installed system-wide,
+`/etc/ssl/certs/ca-certificates.crt` is that bundle. Point `SSL_CERT_FILE` at
+the company CA **alone** and it replaces the trust store instead of extending
+it, so every host the proxy does not re-sign then fails to verify. Elsewhere,
+concatenate the company CA onto a copy of the public roots and mount that.
+
+This is separate from the build-time CA in Step 5 and in
+`docs/development.md`: that one lets `go mod download` reach the module proxy,
+and does nothing for the running container.
+
 ## Step 7 — Verify and hand over
 
 Run the server once by hand so a configuration error is seen now, not inside
@@ -234,11 +266,19 @@ docker run --rm -i --user "$(id -u):$(id -g)" \
   ghcr.io/oxcom/atlassian-mcp-lite:latest </dev/null
 ```
 
-With the placeholder token still in place this exits with a configuration
-error, which is expected. With a real token it waits for input and exits
-quietly on EOF. A permission error prints the exact `chmod` to run. An error
-about ownership means the uid passed to `--user` does not own the mounted
-file; `$(id -u):$(id -g)` above is the uid that does.
+Add the CA arguments from Step 6 here too if the network intercepts TLS.
+
+This exits quietly on EOF whether the token is the placeholder or a real one:
+the placeholder clears the minimum token length, and nothing in startup calls
+Atlassian. So a quiet exit checks the file, not the credentials. What it does
+catch: a permission error prints the exact `chmod` to run; an error about
+ownership means the uid passed to `--user` does not own the mounted file, and
+`$(id -u):$(id -g)` above is the uid that does; a duplicate or lowercase key is
+named in the error.
+
+Credentials are proven only by the first read through the client — a wrong
+token or email returns `401`, an unreachable or misspelled site fails to
+resolve, and a trust-store problem gives the `x509` error above.
 
 Finish with this note to the user, adjusted to what was chosen:
 

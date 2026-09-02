@@ -244,6 +244,22 @@ Alternatively, in Jira: ⚙ *Settings* → *Issues* → *Custom fields*, find *E
 Link*, open its ⋯ menu → *View field information*; the id is the number at the
 end of the URL, prefixed with `customfield_`.
 
+### Trust store
+
+`SSL_CERT_FILE` is not one of this server's settings — `internal/core/config.go`
+never reads it — but the Go runtime does, and on a network that terminates and
+re-signs TLS it is what makes Atlassian reachable at all. Without it every
+request fails with `x509: certificate signed by unknown authority`, because the
+image carries the public roots only.
+
+Set it to a bundle holding **both** the public roots and the company CA; the
+company CA alone replaces the trust store rather than extending it. It belongs
+in the container arguments, not in the config file, since it names a path inside
+the container. The mount and the value are in
+[docs/install.md](install.md#networks-that-intercept-tls); the separate
+build-time CA, which only affects `go mod download`, is in
+[docs/development.md](development.md).
+
 ## Fields returned by the read tools
 
 ### Defaults
