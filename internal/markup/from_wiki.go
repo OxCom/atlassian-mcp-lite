@@ -210,7 +210,11 @@ func FromWiki(wiki string) string {
 		// not run to the end of whatever the caller concatenates next.
 		flushCode()
 	}
-	return strings.Join(out, "\n")
+	// Scrubbed on the way out, once, rather than per line: the field is
+	// untrusted text and a bidirectional override or a tag-block character in
+	// it survives every regex above untouched. Layout is kept, because the
+	// newlines and tabs in this output are the markdown structure.
+	return scrubBody(strings.Join(out, "\n"))
 }
 
 // fenceLanguage keeps a code fence's language only when the parameter really is

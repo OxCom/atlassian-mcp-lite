@@ -19,6 +19,21 @@ func FromHTML(h string) string {
 	if strings.TrimSpace(h) == "" {
 		return ""
 	}
+	// Sanitised before it is parsed. The walk below reads a tree, and the
+	// attacks worth worrying about are the ones that make the tree differ from
+	// what the page appears to say: an mXSS payload that means one thing on the
+	// first parse and another on the second, a comment or CDATA section that
+	// ends where a walk does not expect, an entity decoded twice, or a switch
+	// into SVG or MathML where foreign-content rules apply. htmlPolicy hands
+	// the walk a document containing only the elements and attributes the
+	// renderer reads. See html_policy.go.
+	h = htmlPolicy.Sanitize(h)
+	if strings.TrimSpace(h) == "" {
+		// A page made entirely of elements whose content is dropped — a body
+		// that is one <script> — sanitises to nothing, and the parse below
+		// would otherwise return an empty document for it anyway.
+		return ""
+	}
 	doc, err := html.Parse(strings.NewReader(h))
 	if err != nil {
 		// Reachable, not theoretical: x/net/html recovers its own
@@ -26,11 +41,16 @@ func FromHTML(h string) string {
 		// this branch. Returning the raw input here would hand the model the
 		// page's script and style bodies verbatim — exactly what dropContent
 		// exists to remove — so the fallback tokenizes for text instead.
-		return collapseBlankLines(strings.TrimSpace(textFallback(h)))
+		return scrubBody(collapseBlankLines(strings.TrimSpace(textFallback(h))))
 	}
 	var b strings.Builder
 	render(&b, doc, 0)
-	return collapseBlankLines(strings.TrimSpace(b.String()))
+	// Scrubbed after rendering, not before parsing, and this order is the
+	// point: html.Parse decodes "&#x202e;" and "&#xe0041;" into the real code
+	// points, so an entity-encoded bidirectional override or tag character is
+	// invisible to any check on the page source and present in the output.
+	// Layout is kept — the newlines here are the markdown structure.
+	return scrubBody(collapseBlankLines(strings.TrimSpace(b.String())))
 }
 
 // textFallback extracts visible text without building a tree, for input the
@@ -129,11 +149,13 @@ func render(b *strings.Builder, n *html.Node, listDepth int) {
 		// A refused target keeps the alt text so the reader knows a picture
 		// was there; the destination itself is never emitted.
 		src, ok := safeLinkTarget(src)
-		if !ok {
+		// An empty target is treated as a refused one, not as an empty link.
+		// htmlPolicy refuses a target by dropping the attribute rather than by
+		// blanking its value, so "no src" and "a src the policy would not
+		// allow" arrive here identically, and "![alt]()" is not a useful thing
+		// to hand the model for either.
+		if !ok || src == "" {
 			b.WriteString(escapeMarkdown(alt))
-			return
-		}
-		if src == "" && alt == "" {
 			return
 		}
 		b.WriteString("![" + escapeMarkdown(alt) + "](" + escapeMarkdownURL(src) + ")")
@@ -184,7 +206,11 @@ func render(b *strings.Builder, n *html.Node, listDepth int) {
 		// is refused the label stands on its own as plain text and nothing of
 		// the destination reaches the output.
 		href, ok := safeLinkTarget(attr(n, "href"))
-		if !ok {
+		// Empty is refused for the same reason as on img: htmlPolicy drops a
+		// target it will not allow, so an anchor whose href was refused there
+		// is indistinguishable from an anchor that never had one, and "[x]()"
+		// is a link to nowhere either way.
+		if !ok || href == "" {
 			b.WriteString(strings.TrimSpace(inner.String()))
 			return
 		}
