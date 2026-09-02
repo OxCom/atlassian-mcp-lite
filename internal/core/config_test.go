@@ -55,7 +55,7 @@ func TestCapabilityFlagSynonyms(t *testing.T) {
 		want bool
 	}{
 		{"true", true}, {"TRUE", true}, {" 1 ", true}, {"yes", true}, {"on", true},
-		{"false", false}, {"0", false}, {"no", false}, {"off", false}, {"", false},
+		{"false", false}, {"0", false}, {"no", false}, {"off", false}, {"", true},
 	} {
 		cfg, err := load(tc.raw)
 		if err != nil {
@@ -236,6 +236,37 @@ func TestLoadDerivesDomainCaps(t *testing.T) {
 	}
 	if got := cfg.Domains["confluence"]; !got.Read || got.Write || got.Destructive {
 		t.Errorf("confluence caps = %+v, want read only (unset means false)", got)
+	}
+}
+
+// With nothing set, every domain reads and nothing writes: the server is
+// useful out of the box and still unable to modify anything.
+func TestCapabilityDefaultsAreReadOnly(t *testing.T) {
+	cfg, err := Load(env(map[string]string{
+		"ATLAS_BASE_URL": "https://x.atlassian.net",
+		"ATLAS_EMAIL":    "a@b.c",
+		"ATLAS_TOKEN":    "t",
+	}), []string{"jira", "confluence"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, d := range []string{"jira", "confluence"} {
+		if got := cfg.Domains[d]; !got.Read || got.Write || got.Destructive {
+			t.Errorf("%s caps = %+v, want read only by default", d, got)
+		}
+	}
+
+	cfg, err = Load(env(map[string]string{
+		"ATLAS_BASE_URL":  "https://x.atlassian.net",
+		"ATLAS_EMAIL":     "a@b.c",
+		"ATLAS_TOKEN":     "t",
+		"ATLAS_JIRA_READ": "false",
+	}), []string{"jira"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Domains["jira"].Any() {
+		t.Errorf("jira caps = %+v, want nothing enabled once read is turned off", cfg.Domains["jira"])
 	}
 }
 

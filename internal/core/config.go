@@ -124,19 +124,24 @@ func Load(getenv func(string) string, domains []string) (Config, error) {
 
 		prefix := "ATLAS_" + strings.ToUpper(d) + "_"
 		caps := Caps{}
+		// Read is on unless the operator turns it off; write and destructive
+		// are off unless turned on. Reading changes nothing, so an unset
+		// installation is useful out of the box while still unable to modify
+		// anything.
 		for _, flag := range []struct {
 			suffix string
 			dst    *bool
+			def    bool
 		}{
-			{"READ", &caps.Read},
-			{"WRITE", &caps.Write},
-			{"DESTRUCTIVE", &caps.Destructive},
+			{"READ", &caps.Read, true},
+			{"WRITE", &caps.Write, false},
+			{"DESTRUCTIVE", &caps.Destructive, false},
 		} {
 			// A typo such as "ture" must not quietly mean false: it would
 			// disable a capability the operator believes is on, or — read the
 			// other way round in a future refactor — enable one they believe is
 			// off. Either way the operator gets no signal, so it fails at load.
-			v, err := parseBool(getenv(prefix + flag.suffix))
+			v, err := parseBool(getenv(prefix+flag.suffix), flag.def)
 			if err != nil {
 				return Config{}, fmt.Errorf("%s%s: %w", prefix, flag.suffix, err)
 			}
@@ -356,12 +361,11 @@ func allowed(list []string, key string) bool {
 }
 
 // parseBool accepts the usual spellings of both truth values. An unset value
-// is false — a capability is off until it is turned on — but an unrecognised
-// one is an error rather than a silent false.
-func parseBool(s string) (bool, error) {
+// yields def, but an unrecognised one is an error rather than a silent default.
+func parseBool(s string, def bool) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "":
-		return false, nil
+		return def, nil
 	case "1", "true", "yes", "on":
 		return true, nil
 	case "0", "false", "no", "off":

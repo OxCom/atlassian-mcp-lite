@@ -114,10 +114,15 @@ func TestSearchSendsJQLAndDefaultFields(t *testing.T) {
 	for _, f := range fields {
 		joined = append(joined, f.(string))
 	}
-	for _, want := range []string{"summary", "status", "assignee", "fixVersions", "parent", "updated"} {
-		if !containsField(joined, want) {
-			t.Errorf("default fields missing %q: %v", want, joined)
+	// The default set is documented in docs/configuration.md; keep both in step.
+	want := []string{"summary", "status", "updated", "assignee", "reporter"}
+	for _, f := range want {
+		if !containsField(joined, f) {
+			t.Errorf("default fields missing %q: %v", f, joined)
 		}
+	}
+	if len(joined) != len(want) {
+		t.Errorf("default fields = %v, want exactly %v", joined, want)
 	}
 	if containsField(joined, "description") {
 		t.Error("description must NOT be in jira_search defaults")
@@ -150,13 +155,19 @@ func TestSearchTruncationFallsBackToCountWhenNoSignal(t *testing.T) {
 }
 
 func TestGetUsesV2AndConvertsDescriptionToMarkdown(t *testing.T) {
+	var gotFields string
 	m := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/") {
 			t.Errorf("jira_get must use v2 so description is wiki markup, got %s", r.URL.Path)
 		}
+		gotFields = r.URL.Query().Get("fields")
 		_, _ = io.WriteString(w, `{"key":"PROJ-1","fields":{"summary":"S","description":"h3. Objective\n\nDo *the* thing"}}`)
 	})
 	out := call(t, m, "jira_get", map[string]any{"key": "PROJ-1"})
+	// The default set is documented in docs/configuration.md; keep both in step.
+	if want := "summary,status,updated,assignee,reporter,description"; gotFields != want {
+		t.Errorf("default fields = %q, want %q", gotFields, want)
+	}
 	raw, _ := json.Marshal(out)
 	if !strings.Contains(string(raw), "### Objective") {
 		t.Errorf("description not converted to markdown: %s", raw)
@@ -175,7 +186,7 @@ func TestSearchTranslatesLogicalEpicField(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		_, _ = io.WriteString(w, `{"issues":[],"isLast":true}`)
 	})
-	call(t, m, "jira_search", map[string]any{"jql": "x"})
+	call(t, m, "jira_search", map[string]any{"jql": "x", "fields": []string{"+epic"}})
 
 	fields, _ := body["fields"].([]any)
 	names := make([]string, 0, len(fields))
@@ -417,6 +428,30 @@ func TestUnavailableFieldsAreReported(t *testing.T) {
 	}
 	if len(missing) != 1 || missing[0] != "nosuchfield" {
 		t.Errorf("unavailable_fields = %v, want [nosuchfield]", missing)
+	}
+}
+
+// "*all" expands server-side and never comes back under its own name, so it
+// must not be reported as a field Jira failed to return.
+func TestStarSelectorsAreNotReportedUnavailable(t *testing.T) {
+	m := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			_, _ = io.WriteString(w, `{"issues":[{"key":"PROJ-1","fields":{"summary":"S"}}],"isLast":true}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"key":"PROJ-1","fields":{"summary":"S"}}`)
+	})
+	for _, tc := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"jira_search", map[string]any{"jql": "x", "fields": []string{"*all"}}},
+		{"jira_get", map[string]any{"key": "PROJ-1", "fields": []string{"*navigable"}}},
+	} {
+		out := call(t, m, tc.tool, tc.args).(map[string]any)
+		if missing, ok := out["unavailable_fields"]; ok {
+			t.Errorf("%s: unavailable_fields = %v, want none for a star selector", tc.tool, missing)
+		}
 	}
 }
 

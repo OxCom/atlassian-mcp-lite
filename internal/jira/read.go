@@ -14,17 +14,21 @@ import (
 	"github.com/OxCom/atlassian-mcp-lite/internal/markup"
 )
 
-// searchDefaults is the triage set: enough to decide what an issue is and who
-// owns it, without the description, which dominates the payload.
+// searchDefaults is the triage set: what an issue is, where it stands, when it
+// last moved and who owns and raised it. The description is left out because it
+// dominates the payload. Anything else is one "+name" away, and "*all" returns
+// every field Jira has.
 //
-// "epic" here is a LOGICAL name. Jira has no field called epic — classic
-// projects store the link in a site-specific custom field — so every field list
-// is translated before the request and translated back in the response.
+// This list is documented in docs/configuration.md; change both together.
 var searchDefaults = []string{
-	"summary", fieldStatus, "issuetype", "assignee", "fixVersions", "parent", "epic", "updated",
+	"summary", fieldStatus, "updated", "assignee", "reporter",
 }
 
-// logicalEpic is the name callers use for the Epic Link field.
+// logicalEpic is the name callers use for the Epic Link field. Jira has no
+// field called epic — classic projects store the link in a site-specific custom
+// field — so every field list is translated before the request and translated
+// back in the response.
+
 const logicalEpic = "epic"
 
 // toUpstreamFields translates logical field names to what Jira expects.
@@ -47,7 +51,7 @@ func fieldsProperty() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type:        "array",
 		Items:       &jsonschema.Schema{Type: typeString},
-		Description: `Fields to return. Omit for the default set. Bare names replace the default set entirely; "+name" adds to it; "-name" removes from it. Do not mix bare and prefixed names.`,
+		Description: `Fields to return. Omit for the default set (summary, status, updated, assignee, reporter; jira_get adds description). Bare names replace the default set entirely; "+name" adds to it; "-name" removes from it; "*all" returns every field. Do not mix bare and prefixed names.`,
 	}
 }
 
@@ -297,6 +301,11 @@ func unavailableFields(requested []string, issues []map[string]any) []string {
 	}
 	var missing []string
 	for _, f := range requested {
+		// "*all" and "*navigable" expand server-side and never come back under
+		// their own name, so they cannot be missing.
+		if core.IsStarSelector(f) {
+			continue
+		}
 		found := false
 		for _, issue := range issues {
 			if _, ok := issue[f]; ok {

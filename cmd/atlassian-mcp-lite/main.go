@@ -39,7 +39,20 @@ func run() error {
 	reg.Register(jira.New())
 	reg.Register(confluence.New())
 
-	cfg, err := core.Load(os.Getenv, reg.Domains())
+	// ATLAS_ENV_FILE names the private config file. It is refused unless only
+	// its owner can read it: the file holds an API token that carries the full
+	// authority of its account. Process environment still wins over the file,
+	// so a container can override single values without editing it.
+	getenv := os.Getenv
+	if path := os.Getenv(core.EnvFileVar); path != "" {
+		var err error
+		if getenv, err = core.LoadEnvFile(path, os.LookupEnv); err != nil {
+			return fmt.Errorf("configuration: %w", err)
+		}
+		bootLog.Debugf("configuration file %s loaded", path)
+	}
+
+	cfg, err := core.Load(getenv, reg.Domains())
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
@@ -65,7 +78,7 @@ func run() error {
 		return fmt.Errorf("build server: %w", err)
 	}
 	if n == 0 {
-		return errors.New("no tools enabled: set at least one of ATLAS_<DOMAIN>_{READ,WRITE,DESTRUCTIVE}")
+		return errors.New("no tools enabled: every ATLAS_<DOMAIN>_READ is off and no WRITE or DESTRUCTIVE capability is on; enable at least one")
 	}
 	log.Debugf("serving %d tools over stdio", n)
 

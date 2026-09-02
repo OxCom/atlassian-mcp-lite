@@ -1,4 +1,4 @@
-name: ci
+name: Verify and release
 
 on:
   push:
@@ -13,43 +13,72 @@ permissions:
 env:
   GO_VERSION: "1.27"
 
-# A strict chain: security -> lint -> test -> build -> release.
-# Every stage needs the one before it, so a secret leak stops the run before
-# anything is compiled, and nothing is released that has not passed all four.
+# Five stages, each gated on the whole of the previous one:
+#
+#   security  gitleaks | trufflehog | govulncheck | gosec | tidy
+#   lint      golangci-lint | fmt | vet
+#   test      race + coverage
+#   build     linux/amd64 | linux/arm64 | darwin/arm64 | windows/amd64   (tags only)
+#   release   image + GitHub release                                     (tags only)
+#
+# Jobs inside a stage run in parallel and are independent of one another, so a
+# single failing scanner does not hide what the others would have found. A stage
+# starts only when every job of the stage before it has passed, so a secret
+# leak still stops the run before anything is compiled, and nothing is released
+# that has not passed all four verification stages.
 jobs:
 
-  security:
-    name: security
+  # ---------------------------------------------------------------- security
+
+  security-gitleaks:
+    name: "security: gitleaks"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           # gitleaks needs history to scan past commits, not just the tip.
           fetch-depth: 0
-
-      - name: gitleaks (secrets in tree and history)
+      - name: secrets in tree and history
         run: |
           docker run --rm -v "$PWD:/src" -w /src \
             ghcr.io/gitleaks/gitleaks:v8.30.1 \
             detect --source=/src --redact --verbose --exit-code 1
 
-      - name: trufflehog (verified secrets)
+  security-trufflehog:
+    name: "security: trufflehog"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: verified secrets
         run: |
           docker run --rm -v "$PWD:/src" \
             trufflesecurity/trufflehog:3.97.1 \
             filesystem /src --results=verified,unknown --fail
 
+  security-govulncheck:
+    name: "security: govulncheck"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-
-      - name: govulncheck (dependency vulnerabilities reachable from this code)
+      - name: dependency vulnerabilities reachable from this code
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           govulncheck ./...
 
-      - name: gosec (static analysis of our own code)
+  security-gosec:
+    name: "security: gosec"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: static analysis of our own code
         # Installed rather than pulled: the securego/gosec image lags the
         # releases by months (2.24.6 vs v2.29.0), and this keeps CI on the same
         # version as `make gosec`.
@@ -57,12 +86,8 @@ jobs:
           go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
           gosec -severity medium -confidence medium -exclude-dir=docs ./...
 
-      - name: go.mod is tidy
-        run: go mod tidy -diff
-
-  lint:
-    name: lint
-    needs: security
+  security-tidy:
+    name: "security: go.mod is tidy"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -70,20 +95,38 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - name: golangci-lint
+      - name: go.mod and go.sum would not change
+        run: go mod tidy -diff
+
+  # -------------------------------------------------------------------- lint
+
+  lint-golangci:
+    name: "lint: golangci-lint"
+    needs: [security-gitleaks, security-trufflehog, security-govulncheck, security-gosec, security-tidy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: golangci-lint run
         run: |
           docker run --rm -v "$PWD:/src" -w /src \
             golangci/golangci-lint:v2.13.2 \
             golangci-lint run --timeout 5m
-      - name: formatting is clean
+
+  lint-fmt:
+    name: "lint: formatting"
+    needs: [security-gitleaks, security-trufflehog, security-govulncheck, security-gosec, security-tidy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: gofmt and goimports leave no diff
         run: |
           docker run --rm -v "$PWD:/src" -w /src \
             golangci/golangci-lint:v2.13.2 \
             golangci-lint fmt --diff
 
-  test:
-    name: test
-    needs: lint
+  lint-vet:
+    name: "lint: go vet"
+    needs: [security-gitleaks, security-trufflehog, security-govulncheck, security-gosec, security-tidy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -93,6 +136,19 @@ jobs:
           cache: true
       - name: go vet
         run: go vet ./...
+
+  # -------------------------------------------------------------------- test
+
+  test:
+    name: "test: race + coverage"
+    needs: [lint-golangci, lint-fmt, lint-vet]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
       - name: test with race detector
         # CGO is required by -race, so it is enabled here only.
         env:
@@ -106,8 +162,10 @@ jobs:
           path: coverage.out
           retention-days: 7
 
+  # ------------------------------------------------------------------- build
+
   build:
-    name: build
+    name: "build: ${{ matrix.goos }}/${{ matrix.goarch }}"
     needs: test
     # Binaries are produced for tags only. Branches stop after test.
     if: startsWith(github.ref, 'refs/tags/v')
@@ -152,25 +210,19 @@ jobs:
           name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
 
-  release:
-    name: release
+  # ----------------------------------------------------------------- release
+
+  release-image:
+    name: "release: container image"
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
     steps:
       - uses: actions/checkout@v7.0.1
-
-      - name: collect build artifacts
-        uses: actions/download-artifact@v8.0.1
-        with:
-          pattern: dist-*
-          path: dist
-          merge-multiple: true
-
-      - name: build and push the container image
+      - name: build and push to ghcr.io
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | \
             docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -184,6 +236,20 @@ jobs:
           docker push "${IMAGE}:${GITHUB_REF_NAME}"
           docker push "${IMAGE}:latest"
 
+  release-github:
+    name: "release: GitHub release"
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: collect build artifacts
+        uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
       - uses: softprops/action-gh-release@v3.0.3
         with:
           files: dist/*

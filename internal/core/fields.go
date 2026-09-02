@@ -41,6 +41,11 @@ var starSelectors = map[string]bool{
 	"*navigable": true,
 }
 
+// IsStarSelector reports whether name is one of Atlassian's own selectors
+// ("*all", "*navigable") rather than a field. A selector never appears as a key
+// in a response, so a module must not report it as an unavailable field.
+func IsStarSelector(name string) bool { return starSelectors[strings.ToLower(name)] }
+
 // ErrFieldSelection is the class of error returned for an unusable field
 // request, so a caller can tell a bad request from a transport failure.
 var ErrFieldSelection = errors.New("invalid field selection")

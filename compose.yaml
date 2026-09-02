@@ -29,10 +29,13 @@ services:
     stdin_open: true
     tty: false
 
-    # Configuration is environment only. Point ATLAS_ENV_FILE at your private
-    # env file — the README's Running section has a minimal one to start from.
-    # `required: false` keeps `docker compose build` and `make image` working on
-    # a machine that has not created one yet.
+    # Point ATLAS_ENV_FILE at your private config file; docs/configuration.md
+    # has a minimal one to start from. Compose reads it on the host and injects
+    # plain variables, so the server's own 0600 permission check does not run
+    # on this path — it does when the file is mounted and ATLAS_ENV_FILE is set
+    # inside the container, which is how the README tells an MCP client to
+    # launch it. `required: false` keeps `docker compose build` and `make image`
+    # working on a machine that has not created one yet.
     env_file:
       - path: ${ATLAS_ENV_FILE:-./.env}
         required: false
@@ -42,8 +45,9 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # No volumes. This server never reads a local file, and no tool accepts a
-    # filesystem path, so there is nothing to mount.
+    # No volumes here. No tool accepts a filesystem path; the only file the
+    # server ever reads is the one ATLAS_ENV_FILE names, and for the smoke test
+    # Compose has already turned it into environment.
     #
     # Egress is NOT restricted here. read_only, cap_drop and no-new-privileges
     # constrain the filesystem and privileges, not network destinations. SSRF is
