@@ -395,3 +395,59 @@ func TestMaskHeadersNilAndNonCanonicalKeys(t *testing.T) {
 		t.Errorf("a non-canonical key bypassed masking: %q", got)
 	}
 }
+
+// Log lines are the audit trail. A message carrying a newline could end one
+// entry and forge the next, complete with a level prefix, so line breaks are
+// rendered as their two-character escapes rather than written raw.
+func TestEmitRendersLineBreaksAsEscapes(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger("info", &buf)
+	l.Error("upstream body:\nERROR forged entry\r\nmore")
+
+	out := buf.String()
+	if got := strings.Count(out, "\n"); got != 1 {
+		t.Fatalf("wrote %d lines, want exactly 1: %q", got, out)
+	}
+	if strings.Contains(out, "\r") {
+		t.Errorf("a raw carriage return survived: %q", out)
+	}
+	if !strings.Contains(out, `upstream body:\nERROR forged entry\r\nmore`) {
+		t.Errorf("line breaks must be rendered as the literal escapes: %q", out)
+	}
+	if !strings.HasPrefix(out, "ERROR upstream body:") {
+		t.Errorf("only the genuine level prefix may start the line: %q", out)
+	}
+}
+
+// Redact feeds text that reaches the model. A partial mask still shows eight
+// characters of a credential, and eight characters is a useful head start on
+// guessing the rest, so the tool-facing form is a fixed marker instead.
+func TestRedactReplacesSecretsWithAFixedMarker(t *testing.T) {
+	const token = "ATATT3xFfGF0-fixture-token-value"
+	basic := BasicCredential("user@example.com", token)
+	l := NewLogger("info", &bytes.Buffer{}, token, basic)
+
+	got := l.Redact("401: token " + token + " and Authorization: Basic " + basic + " rejected")
+	want := "401: token [REDACTED] and Authorization: Basic [REDACTED] rejected"
+	if got != want {
+		t.Errorf("Redact = %q, want %q", got, want)
+	}
+	for _, leak := range []string{token, basic, token[:4], token[len(token)-4:], basic[:4], basic[len(basic)-4:], "*"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("Redact leaked %q: %q", leak, got)
+		}
+	}
+}
+
+// Mask keeps its recognisable shape for header values in debug logs, and Redact
+// does not inherit it: the two are separate on purpose.
+func TestRedactAndMaskAreDistinct(t *testing.T) {
+	const token = "recognisable-token-value-0123"
+	l := NewLogger("info", &bytes.Buffer{}, token)
+	if l.Redact(token) == Mask(token) {
+		t.Errorf("Redact must not produce the partial mask %q", Mask(token))
+	}
+	if !strings.HasPrefix(Mask(token), "reco") {
+		t.Errorf("Mask must keep its current behaviour: %q", Mask(token))
+	}
+}

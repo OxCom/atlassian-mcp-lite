@@ -1,6 +1,9 @@
 package markup
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestToWikiHeadings(t *testing.T) {
 	for in, want := range map[string]string{
@@ -300,5 +303,54 @@ func TestToWikiDocumentedLimitations(t *testing.T) {
 	// sees it.
 	if got, want := ToWiki("| A | B |\n|---|---|\n| 1 | 2 | 3 |"), "||A||B||\n|1|2|"; got != want {
 		t.Errorf("ragged row: got %q, want %q", got, want)
+	}
+}
+
+// Inline HTML is content the author typed, not markup this converter produced.
+// Written through raw, an attribute value or a comment body is a hole straight
+// past the escaper: "{code}" inside a title attribute opens a live macro.
+func TestToWikiRawHTMLCannotForgeWikiMarkup(t *testing.T) {
+	for _, c := range []struct {
+		name, in, want, forbid string
+	}{
+		{"macro in attribute", `<span title="{code}">x</span>`, `\{code\}`, "{code}"},
+		{"mention in attribute", `<b title="[~accountid:557058:abc]">t</b>`, `\[\~accountid:557058:abc\]`, "[~accountid"},
+		{"link in inline comment", `x <!-- [link|https://evil.example] --> y`, `\[link\|https://evil.example\]`, "[link|"},
+	} {
+		got := ToWiki(c.in)
+		if !strings.Contains(got, c.want) {
+			t.Errorf("%s: ToWiki(%q) = %q, want it to contain %q", c.name, c.in, got, c.want)
+		}
+		if strings.Contains(got, c.forbid) {
+			t.Errorf("%s: ToWiki(%q) = %q, must not contain live %q", c.name, c.in, got, c.forbid)
+		}
+	}
+}
+
+// The fence info string is a macro parameter. Unvalidated, "}" inside it
+// closes {code:...} early and the rest of the line, and the body after it, is
+// live markup rather than literal code.
+func TestToWikiFenceLanguageIsValidated(t *testing.T) {
+	got := ToWiki("```x}TEXT{code\n{code}\nbody\n```")
+	first, _, _ := strings.Cut(got, "\n")
+	if first != "{code}" {
+		t.Errorf("first line = %q, want bare {code}", first)
+	}
+	if !strings.Contains(got, `{code\}`) {
+		t.Errorf("body must still pass through safeCodeBody: %q", got)
+	}
+	if strings.Contains(got, "TEXT") {
+		t.Errorf("rejected language must be dropped, not emitted: %q", got)
+	}
+
+	for lang, want := range map[string]string{
+		"go":  "{code:go}",
+		"c++": "{code:c++}",
+		"c#":  "{code:c#}",
+	} {
+		got := ToWiki("```" + lang + "\nx\n```")
+		if first, _, _ := strings.Cut(got, "\n"); first != want {
+			t.Errorf("language %q: first line = %q, want %q", lang, first, want)
+		}
 	}
 }

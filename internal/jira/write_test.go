@@ -486,3 +486,45 @@ func TestWriteToolsPropagateUpstreamErrors(t *testing.T) {
 		})
 	}
 }
+
+// A deployment that has turned read off has said its caller may not see Jira's
+// data. A transition error must not become the way to list a workflow anyway.
+func TestTransitionErrorsHideNamesWithoutRead(t *testing.T) {
+	base := newTestModule(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"transitions":[{"id":"51","name":"Done","to":{"name":"Closed"}},{"id":"52","name":"Finish","to":{"name":"Done"}}]}`)
+	}).(module)
+	base.cfg.Domains = map[string]core.Caps{Domain: {Destructive: true}}
+
+	err := callErr(t, base, "jira_transition", map[string]any{"key": "PROJ-1", "status": "Nope"})
+	for _, leak := range []string{"Closed", "Finish"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("error = %v, must not enumerate transitions when read is disabled", err)
+		}
+	}
+	for _, want := range []string{"2 available", "use an exact transition name"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to carry %q", err, want)
+		}
+	}
+
+	err = callErr(t, base, "jira_transition", map[string]any{"key": "PROJ-1", "status": "Done"})
+	for _, leak := range []string{"Closed", "Finish"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("ambiguity error = %v, must not enumerate transitions when read is disabled", err)
+		}
+	}
+	if !strings.Contains(err.Error(), "2 transitions") {
+		t.Errorf("ambiguity error = %v, want the count", err)
+	}
+}
+
+// With read on the names are shown, but as quoted third-party data.
+func TestTransitionErrorsQuoteNames(t *testing.T) {
+	m := newTestModule(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"transitions":[{"id":"51","name":"Done","to":{"name":"Closed"}}]}`)
+	})
+	err := callErr(t, m, "jira_transition", map[string]any{"key": "PROJ-1", "status": "Nope"})
+	if !strings.Contains(err.Error(), `"Done" -> "Closed" (id 51)`) {
+		t.Errorf("error = %v, want the transition rendered with quoted names", err)
+	}
+}

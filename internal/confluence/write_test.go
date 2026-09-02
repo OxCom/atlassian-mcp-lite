@@ -627,3 +627,145 @@ func TestTitleLimitCountsCharacters(t *testing.T) {
 		t.Errorf("error = %v, want a character-based limit message", err)
 	}
 }
+
+// The registry withholds a tool whose action class is disabled, so in normal
+// operation a disabled handler is never reached. The handler is still where
+// the write happens, so it re-checks the capability rather than trusting its
+// caller — a future dispatcher bug must not turn a read-only deployment into
+// a writable one.
+func TestWriteHandlersRecheckCapabilityAtRuntime(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		tool string
+		args map[string]any
+		caps core.Caps
+		want string
+	}{
+		{"create without write", "confluence_create_page",
+			map[string]any{"space": "DOCS", "title": "T", "body": "x"},
+			core.Caps{Read: true, Destructive: true}, "write"},
+		{"comment without write", "confluence_comment",
+			map[string]any{"page_id": "123", "body": "x"},
+			core.Caps{Read: true, Destructive: true}, "write"},
+		{"update without destructive", "confluence_update_page",
+			map[string]any{"id": "123", "body": "x"},
+			core.Caps{Read: true, Write: true}, "destructive"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			base := newTestModule(t, func(http.ResponseWriter, *http.Request) {
+				t.Error("a handler whose capability is off must make no request at all")
+			}).(module)
+			base.cfg.Domains[Domain] = c.caps
+
+			err := callErr(t, base, c.tool, c.args)
+			if !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), Domain) {
+				t.Errorf("error = %v, want it to name the %s capability and the %s domain", err, c.want, Domain)
+			}
+		})
+	}
+}
+
+// A declaration-only module has no client. Dispatching to it is a wiring bug in
+// main, and it must surface as an error rather than a nil dereference.
+func TestHandlersRefuseWithoutAClient(t *testing.T) {
+	m := New()
+	for _, c := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"confluence_search", map[string]any{"cql": "type=page"}},
+		{"confluence_get_page", map[string]any{"id": "123"}},
+		{"confluence_create_page", map[string]any{"space": "DOCS", "title": "T", "body": "x"}},
+		{"confluence_update_page", map[string]any{"id": "123", "body": "x"}},
+		{"confluence_comment", map[string]any{"page_id": "123", "body": "x"}},
+	} {
+		if err := callErr(t, m, c.tool, c.args); !strings.Contains(err.Error(), "no client") {
+			t.Errorf("%s: error = %v, want it to say the module has no client", c.tool, err)
+		}
+	}
+}
+
+// A child page lives in its parent's space. If the parent were in a space
+// outside the allowlist, naming an allowlisted space in the request would be a
+// way to write into the forbidden one. In restricted mode the parent's space is
+// therefore resolved and required to match before anything is created.
+func TestCreatePageRefusesAParentInAnotherSpace(t *testing.T) {
+	posted := false
+	base := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posted = true
+		}
+		switch r.URL.Path {
+		case "/wiki/api/v2/pages/42":
+			_, _ = io.WriteString(w, `{"id":"42","title":"Parent","spaceId":"7","version":{"number":1}}`)
+		case "/wiki/api/v2/spaces/7":
+			_, _ = io.WriteString(w, `{"id":"7","key":"HR"}`)
+		case "/wiki/api/v2/spaces":
+			_, _ = io.WriteString(w, `{"results":[{"id":"9","key":"SANDBOX"}]}`)
+		default:
+			_, _ = io.WriteString(w, `{"id":"555","title":"T"}`)
+		}
+	}).(module)
+	base.cfg.WriteSpaces = []string{"SANDBOX"}
+
+	err := callErr(t, base, "confluence_create_page", map[string]any{
+		"space": "SANDBOX", "title": "T", "body": "x", "parent_id": "42",
+	})
+	if !strings.Contains(err.Error(), "HR") || !strings.Contains(err.Error(), "SANDBOX") {
+		t.Errorf("error = %v, want it to name both the parent's space and the requested one", err)
+	}
+	if posted {
+		t.Error("refusal must happen before the page is created")
+	}
+}
+
+func TestCreatePageAcceptsAParentInTheSameSpace(t *testing.T) {
+	var body map[string]any
+	base := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost:
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_, _ = io.WriteString(w, `{"id":"555","title":"T"}`)
+		case r.URL.Path == "/wiki/api/v2/pages/42":
+			_, _ = io.WriteString(w, `{"id":"42","title":"Parent","spaceId":"9","version":{"number":1}}`)
+		case r.URL.Path == "/wiki/api/v2/spaces/9":
+			// Mixed case on purpose: the comparison folds case the same way
+			// the allowlist does, so "Sandbox" from the server matches.
+			_, _ = io.WriteString(w, `{"id":"9","key":"Sandbox"}`)
+		case r.URL.Path == "/wiki/api/v2/spaces":
+			_, _ = io.WriteString(w, `{"results":[{"id":"9","key":"SANDBOX"}]}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}).(module)
+	base.cfg.WriteSpaces = []string{"SANDBOX"}
+
+	raw, _ := json.Marshal(map[string]any{
+		"space": "SANDBOX", "title": "T", "body": "x", "parent_id": "42",
+	})
+	if _, err := declFor(t, base, "confluence_create_page").Handle(context.Background(), raw); err != nil {
+		t.Fatalf("a parent in the requested space must be accepted: %v", err)
+	}
+	if body["parentId"] != "42" {
+		t.Errorf("parentId = %v, want 42 sent in the create body", body["parentId"])
+	}
+}
+
+// Without an allowlist every space is writable, so resolving the parent's space
+// would cost two requests to learn nothing. The check is skipped, as it is for
+// update and comment.
+func TestCreatePageSkipsParentLookupWhenUnrestricted(t *testing.T) {
+	m := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/wiki/api/v2/pages/") {
+			t.Errorf("no parent lookup expected in unrestricted mode: %s", r.URL.Path)
+		}
+		if r.URL.Path == "/wiki/api/v2/spaces" {
+			_, _ = io.WriteString(w, `{"results":[{"id":"9","key":"DOCS"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"555","title":"T"}`)
+	})
+	call(t, m, "confluence_create_page", map[string]any{
+		"space": "DOCS", "title": "T", "body": "x", "parent_id": "42",
+	})
+}

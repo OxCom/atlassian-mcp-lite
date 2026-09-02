@@ -109,7 +109,18 @@ func MaskHeaders(h http.Header) map[string]string {
 // minRedactableSecret is the shortest value worth redacting from a log message.
 // Below it, a secret is likely to occur inside ordinary words, and blanking
 // those out destroys the diagnostics the log exists to provide.
+//
+// Dropping a secret here never drops a real credential: validateToken refuses
+// any ATLAS_TOKEN under minTokenRunes (16), and the Basic credential derived
+// from it is longer still. Only a test fixture or a stray empty string can
+// fall below this line.
 const minRedactableSecret = 8
+
+// redactedMarker replaces a secret in text that reaches the model. It is a
+// fixed string rather than a partial mask because Mask reveals eight
+// characters of the value, and eight characters of a credential in a tool
+// result is a head start for anyone reading the transcript.
+const redactedMarker = "[REDACTED]"
 
 // Logger writes diagnostics to the writer it is given. Callers must pass stderr
 // in production: stdout carries the MCP protocol, and anything written there
@@ -204,7 +215,12 @@ func BasicCredential(email, token string) string {
 }
 
 func (l *Logger) emit(level, msg string) {
-	msg = l.redact(msg)
+	msg = l.redact(msg, Mask)
+	// Line breaks in the message are rendered as their two-character escapes.
+	// The log is one entry per line, and a message carrying a newline — an
+	// upstream body, a panic value — could otherwise end this entry and forge
+	// the next one, complete with a level prefix.
+	msg = strings.NewReplacer("\r", `\r`, "\n", `\n`).Replace(msg)
 	// One Write under the lock, so concurrent tool calls cannot interleave
 	// halves of two messages on the same line.
 	l.mu.Lock()
@@ -215,13 +231,19 @@ func (l *Logger) emit(level, msg string) {
 	_, _ = io.WriteString(l.w, level+" "+msg+"\n")
 }
 
-// redact replaces every configured secret with its masked form in a single
+// redact replaces every configured secret with replace(secret) in a single
 // left-to-right pass, preferring the longest secret at each position.
 //
 // Sequential strings.ReplaceAll calls would be order-dependent and would also
-// rescan text they had already substituted, so one secret's masked form could
+// rescan text they had already substituted, so one secret's replacement could
 // be rewritten again by another secret. A single pass cannot do either.
-func (l *Logger) redact(msg string) string {
+//
+// The replacement is a parameter because the log and the tool result want
+// different things: the log keeps Mask's recognisable shape so an operator can
+// tell which credential a line is about, while text bound for the model gets
+// the fixed marker. Sharing the scan and not the replacement is what keeps the
+// two from drifting apart.
+func (l *Logger) redact(msg string, replace func(string) string) string {
 	if len(l.secrets) == 0 {
 		return msg
 	}
@@ -231,7 +253,7 @@ func (l *Logger) redact(msg string) string {
 		matched := false
 		for _, secret := range l.secrets {
 			if strings.HasPrefix(msg[i:], secret) {
-				b.WriteString(Mask(secret))
+				b.WriteString(replace(secret))
 				i += len(secret)
 				matched = true
 				break
@@ -245,9 +267,13 @@ func (l *Logger) redact(msg string) string {
 	return b.String()
 }
 
-// Redact returns s with every configured secret replaced by its masked form.
+// Redact returns s with every configured secret replaced by "[REDACTED]".
 //
 // It is exported because redaction cannot be the logger's private concern.
 // Upstream error text also travels back to the caller inside an error value,
-// and a credential echoed there would escape without ever being logged.
-func (l *Logger) Redact(s string) string { return l.redact(s) }
+// and from there into a tool result the model reads, so a credential echoed
+// there would escape without ever being logged. It deliberately does not use
+// Mask: the partial form is for the operator's log, not for the transcript.
+func (l *Logger) Redact(s string) string {
+	return l.redact(s, func(string) string { return redactedMarker })
+}

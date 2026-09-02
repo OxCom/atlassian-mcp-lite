@@ -178,19 +178,23 @@ func (m module) handleTransition(ctx context.Context, raw json.RawMessage) (any,
 	matched := map[int]bool{}
 	available := make([]string, 0, len(list.Transitions))
 	for i, tr := range list.Transitions {
-		available = append(available, fmt.Sprintf("%s -> %s (id %s)", tr.Name, tr.To.Name, tr.ID))
+		// Names are quoted and bounded before they reach an error: they are
+		// workflow data chosen by someone else, not part of the message.
+		available = append(available, fmt.Sprintf("%q -> %q (id %s)",
+			truncateRunes(tr.Name, maxCandidateRunes), truncateRunes(tr.To.Name, maxCandidateRunes), tr.ID))
 		if tr.ID == want || strings.EqualFold(tr.Name, want) || strings.EqualFold(tr.To.Name, want) {
 			matched[i] = true
 		}
 	}
 
 	if len(matched) == 0 {
-		return nil, fmt.Errorf("jira_transition: %s has no transition to %q; available: %s",
-			key, want, strings.Join(available, ", "))
+		// The list is withheld when read is off; see candidateSuffix.
+		return nil, fmt.Errorf("jira_transition: %s has no transition to %q (%d available%s); use an exact transition name",
+			key, want, len(available), m.candidateSuffix(available))
 	}
 	if len(matched) > 1 {
-		return nil, fmt.Errorf("jira_transition: %q matches %d transitions on %s; use the transition id. available: %s",
-			want, len(matched), key, strings.Join(available, ", "))
+		return nil, fmt.Errorf("jira_transition: %q matches %d transitions on %s%s; use the transition id",
+			want, len(matched), key, m.candidateSuffix(available))
 	}
 	chosen := -1
 	for i := range matched {

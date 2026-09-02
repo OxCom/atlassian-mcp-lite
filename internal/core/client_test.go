@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -476,8 +478,9 @@ func TestFieldLevelErrorsAreOrderedStably(t *testing.T) {
 
 	// Asserted as one exact string rather than by sampling several runs and
 	// hoping randomised map order shows itself: an unsorted implementation can
-	// coincidentally produce the expected order every time it is sampled.
-	const want = "assignee: unknown; fixVersions: invalid; summary: required"
+	// coincidentally produce the expected order every time it is sampled. Each
+	// part is quoted because each is third-party text.
+	const want = `"assignee: unknown"; "fixVersions: invalid"; "summary: required"`
 
 	err := c.Do(context.Background(), http.MethodPut, "/x", nil, map[string]any{}, nil)
 	var apiErr *APIError
@@ -886,5 +889,107 @@ func TestTraceIDIsBoundedAndValidated(t *testing.T) {
 		if logs.Len() > 4096 {
 			t.Errorf("%s: log grew to %d bytes", name, logs.Len())
 		}
+	}
+}
+
+// A proxy or login page is not JSON, so the fallback hands back the raw body.
+// That text ends up in a log line and in a tool result, so it must be short and
+// must not carry raw newlines or control characters: a newline lets the body
+// forge a second log line, and 8 KiB of HTML is not a diagnostic.
+func TestRawBodyFallbackIsCappedAndQuoted(t *testing.T) {
+	body := "<html>\n<head><title>Sign in</title></head>\n<body>\nERROR forged line\n" +
+		strings.Repeat("<p>padding</p>\n", 200) + "</body>\n</html>\n"
+	if len(body) < 2048 {
+		t.Fatalf("fixture is %d bytes, want at least 2 KiB", len(body))
+	}
+
+	got := upstreamMessage([]byte(body))
+	if strings.ContainsAny(got, "\r\n") {
+		t.Errorf("message carries a raw line break: %q", got)
+	}
+	if !strings.HasPrefix(got, `"`) || !strings.HasSuffix(got, `"`) {
+		t.Errorf("message must be a quoted Go string: %q", got)
+	}
+	unquoted, err := strconv.Unquote(got)
+	if err != nil {
+		t.Fatalf("message is not strconv.Quote output: %v: %q", err, got)
+	}
+	if !strings.HasSuffix(unquoted, "…") {
+		t.Errorf("a truncated body must end with an ellipsis: %q", unquoted)
+	}
+	if n := len(strings.TrimSuffix(unquoted, "…")); n > maxRawMessageBytes {
+		t.Errorf("kept %d bytes of body, want at most %d", n, maxRawMessageBytes)
+	}
+	if !strings.HasPrefix(unquoted, "<html>") {
+		t.Errorf("the start of the body must survive so the reader can recognise it: %q", unquoted)
+	}
+	if strings.Contains(got, "</html>") {
+		t.Error("the tail of a 2 KiB body must not survive the cap")
+	}
+}
+
+// The cut must fall on a rune boundary, or the message is invalid UTF-8 and
+// strconv.Quote renders the split bytes as \x escapes.
+func TestRawBodyFallbackTruncatesOnRuneBoundary(t *testing.T) {
+	body := strings.Repeat("é", maxRawMessageBytes) // 2 bytes each, so the cap falls mid-rune
+	got, err := strconv.Unquote(upstreamMessage([]byte(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("truncation split a rune: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("want an ellipsis after the cut: %q", got)
+	}
+}
+
+// A short body is quoted but otherwise intact.
+func TestRawBodyFallbackShortBodyIsQuotedWhole(t *testing.T) {
+	got := upstreamMessage([]byte("  Bad gateway\n"))
+	if got != strconv.Quote("Bad gateway") {
+		t.Errorf("got %q, want %q", got, strconv.Quote("Bad gateway"))
+	}
+}
+
+// The JSON-shaped branch carries third-party text just as the raw-body fallback
+// does: errorMessages, the per-field errors and message are all written by
+// Atlassian or echoed from a caller. A newline there would forge a second log
+// line exactly as one in an HTML body would, and an unbounded message would
+// push everything else off the line, so each part is capped and quoted before
+// the parts are joined.
+func TestJSONErrorMessagesAreCappedAndQuoted(t *testing.T) {
+	long := strings.Repeat("z", 2048)
+	body := `{"errorMessages":["boom\nERROR forged","` + long + `"],"message":"tail\r\nsecond"}`
+
+	got := upstreamMessage([]byte(body))
+	if strings.ContainsAny(got, "\r\n") {
+		t.Errorf("message carries a raw line break: %q", got)
+	}
+	if strings.Contains(got, "ERROR forged\n") {
+		t.Error("a forged log line survived")
+	}
+
+	parts := strings.Split(got, "; ")
+	if len(parts) != 3 {
+		t.Fatalf("got %d parts, want 3: %q", len(parts), got)
+	}
+	for i, p := range parts {
+		unquoted, err := strconv.Unquote(p)
+		if err != nil {
+			t.Fatalf("part %d is not strconv.Quote output: %v: %q", i, err, p)
+		}
+		if n := len(strings.TrimSuffix(unquoted, "…")); n > maxRawMessageBytes {
+			t.Errorf("part %d kept %d bytes, want at most %d", i, n, maxRawMessageBytes)
+		}
+	}
+	if first, err := strconv.Unquote(parts[0]); err != nil || first != "boom\nERROR forged" {
+		t.Errorf("part 0 = %q, want the escaped form of the original text", parts[0])
+	}
+	if !strings.HasSuffix(strings.TrimSuffix(parts[1], `"`), "…") {
+		t.Errorf("the 2 KiB part must be truncated with an ellipsis: %q", parts[1])
+	}
+	if strings.Contains(got, long) {
+		t.Error("an unbounded message survived the cap")
 	}
 }

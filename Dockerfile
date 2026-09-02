@@ -1,11 +1,11 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 # The syntax directive is required for RUN --mount=type=secret below.
 
 # One named stage for the base image, so the tag resolves exactly once. Without
 # it the final stage's COPY --from=golang:1.27-trixie is a second, independent
 # resolution, and a tag that moved mid-build would put the toolchain and the
 # runtime trust roots in different images.
-FROM golang:1.27-trixie AS base
+FROM golang:1.27-trixie@sha256:6fa523b3b5f87910a5712ae234ff8b94d80fb99c7b4f94754b135553d8c5588f AS base
 
 # Build the static binary.
 FROM base AS build

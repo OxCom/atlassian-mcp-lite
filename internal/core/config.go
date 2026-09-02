@@ -29,6 +29,14 @@ var (
 	fieldIDRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
 )
 
+// minTokenRunes is the shortest ATLAS_TOKEN accepted. Atlassian API tokens are
+// far longer, so anything under this is a placeholder or a truncated paste,
+// and a placeholder that passes validation fails only on the first request
+// with a 401 that names nothing. It is also what lets the logger's
+// minRedactableSecret floor stay safe: no real credential can be shorter than
+// this, so none is ever dropped from redaction.
+const minTokenRunes = 16
+
 // limitCeiling bounds ATLAS_LIMIT_MAX. Atlassian pages results, so an
 // unbounded limit is a request to buffer an unbounded response.
 const limitCeiling = 1000
@@ -226,6 +234,12 @@ func validateToken(raw string) error {
 	}
 	if strings.ContainsAny(raw, " \t") {
 		return errors.New("must not contain whitespace")
+	}
+	// Counted in runes so the rule matches how the operator counts characters.
+	// The count is deliberately not in the message: it would be one more fact
+	// about the credential in a log.
+	if utf8.RuneCountInString(raw) < minTokenRunes {
+		return fmt.Errorf("must be at least %d characters", minTokenRunes)
 	}
 	return nil
 }

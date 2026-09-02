@@ -228,3 +228,63 @@ func TestFromHTMLCollapsesSourceWhitespace(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// Link and image targets come from the page and reach the model as markdown.
+// Only web and mail schemes, and scheme-less paths, may pass; a javascript: or
+// data: target is dropped and the visible text kept.
+func TestSafeLinkTarget(t *testing.T) {
+	for _, c := range []struct {
+		in, want string
+		ok       bool
+	}{
+		{"javascript:alert(1)", "", false},
+		{" JAVASCRIPT:alert(1)", "", false},
+		{"java\tscript:x", "", false},
+		{"data:text/html,<script>1</script>", "", false},
+		{"vbscript:x", "", false},
+		{"file:///etc/passwd", "", false},
+		{"unknown:thing", "", false},
+		{"https://ok.example/a(b)", "https://ok.example/a(b)", true},
+		{"HTTP://ok.example", "HTTP://ok.example", true},
+		{"/wiki/spaces/X", "/wiki/spaces/X", true},
+		{"mailto:a@b.c", "mailto:a@b.c", true},
+		{"#top", "#top", true},
+		{"foo/bar:baz", "foo/bar:baz", true},
+		{"  https://ok.example/x  ", "https://ok.example/x", true},
+		{"", "", true},
+	} {
+		got, ok := safeLinkTarget(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("safeLinkTarget(%q) = (%q, %v), want (%q, %v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestFromHTMLUnsafeLinkKeepsTextDropsTarget(t *testing.T) {
+	for _, c := range []struct{ in, want, forbid string }{
+		{`<a href="javascript:alert(1)">click</a>`, "click", "javascript"},
+		{`<a href=" JAVASCRIPT:alert(1)">click</a>`, "click", "JAVASCRIPT"},
+		{"<a href=\"java\tscript:x\">click</a>", "click", "script:"},
+		{`<a href="data:text/html,x">click</a>`, "click", "data:"},
+		{`<img src="javascript:alert(1)" alt="pic">`, "pic", "javascript"},
+	} {
+		got := FromHTML(c.in)
+		if !strings.Contains(got, c.want) || strings.Contains(got, c.forbid) || strings.Contains(got, "](") {
+			t.Errorf("FromHTML(%q) = %q, want plain %q with no link", c.in, got, c.want)
+		}
+	}
+	if got := FromHTML(`<p>a<img src="javascript:x">b</p>`); strings.Contains(got, "javascript") || strings.Contains(got, "!") {
+		t.Errorf("image with unsafe target and no alt must vanish: %q", got)
+	}
+	for _, in := range []string{
+		`<a href="https://ok.example/a(b)">t</a>`,
+		`<a href="/wiki/spaces/X">t</a>`,
+		`<a href="mailto:a@b.c">t</a>`,
+		`<a href="#top">t</a>`,
+		`<a href="foo/bar:baz">t</a>`,
+	} {
+		if got := FromHTML(in); !strings.HasPrefix(got, "[t](") {
+			t.Errorf("safe target must stay a link: FromHTML(%q) = %q", in, got)
+		}
+	}
+}

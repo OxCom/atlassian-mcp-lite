@@ -52,10 +52,10 @@ func (m module) createPageDecl() core.ToolDecl {
 		Description: "Create a Confluence page. The body is written in markdown.",
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
-				fieldSpace:  stringProp("Space key, e.g. DOCS."),
+				fieldSpace:  boundedProp("Space key, e.g. DOCS.", maxSpaceKeyLen),
 				fieldTitle:  stringProp("Page title."),
 				fieldBody:   stringProp("Page body. Markdown."),
-				"parent_id": stringProp("Optional parent page id. Numeric, sent as a string."),
+				"parent_id": idProp("Optional parent page id. Numeric, sent as a string."),
 			}, []string{fieldSpace, fieldTitle, fieldBody})
 		},
 		Handle: m.handleCreatePage,
@@ -70,9 +70,18 @@ type createPageArgs struct {
 }
 
 func (m module) handleCreatePage(ctx context.Context, raw json.RawMessage) (any, error) {
+	if m.client == nil {
+		return nil, fmt.Errorf("confluence_create_page: module has no client; construct it with NewWith")
+	}
 	var in createPageArgs
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return nil, fmt.Errorf("confluence_create_page: %w", err)
+	}
+	// The registry already withholds a tool whose class is disabled, and the
+	// SDK validates arguments against the schema — but the handler is where the
+	// write actually happens, so it re-checks rather than trusting its caller.
+	if !m.cfg.Domains[Domain].Write {
+		return nil, fmt.Errorf("confluence_create_page: creating a page requires the write capability for %s", Domain)
 	}
 	space := strings.TrimSpace(in.Space)
 	if space == "" || strings.TrimSpace(in.Title) == "" || strings.TrimSpace(in.Body) == "" {
@@ -113,6 +122,23 @@ func (m module) handleCreatePage(ctx context.Context, raw json.RawMessage) (any,
 		if err != nil {
 			return nil, fmt.Errorf("confluence_create_page: parent_id: %w", err)
 		}
+		// A child page lives in its parent's space, whatever spaceId the
+		// request names. Naming an allowlisted space while pointing at a
+		// parent in a forbidden one would therefore be a way through the
+		// allowlist, so in restricted mode the parent's space is resolved and
+		// must be the requested one. Skipped when unrestricted, where it would
+		// cost two requests to confirm what the allowlist already permits.
+		if m.cfg.RestrictsSpaces() {
+			parentSpace, err := m.spaceKeyForPage(ctx, pid)
+			if err != nil {
+				return nil, fmt.Errorf("confluence_create_page: parent_id: %w", err)
+			}
+			if !strings.EqualFold(strings.TrimSpace(parentSpace), space) {
+				return nil, fmt.Errorf(
+					"confluence_create_page: parent page %s is in space %s, not the requested space %s; a child page is created in its parent's space, so refusing",
+					pid, parentSpace, space)
+			}
+		}
 		body["parentId"] = pid
 	}
 
@@ -142,10 +168,10 @@ func (m module) updatePageDecl() core.ToolDecl {
 			"the meantime.",
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
-				fieldID:    stringProp("Numeric page id, sent as a string."),
+				fieldID:    idProp("Numeric page id, sent as a string."),
 				fieldTitle: stringProp("Optional new title. Omit to keep the current one."),
 				fieldBody:  stringProp("Replacement body. Markdown."),
-				fieldVersion: stringProp("Optional version this update is based on — the one " +
+				fieldVersion: idProp("Optional version this update is based on — the one " +
 					"confluence_get_page returned. Numeric, sent as a string. When supplied, the " +
 					"update is refused if anyone else has edited the page since. Omit to overwrite " +
 					"whatever is current."),
@@ -163,6 +189,9 @@ type updatePageArgs struct {
 }
 
 func (m module) handleUpdatePage(ctx context.Context, raw json.RawMessage) (any, error) {
+	if m.client == nil {
+		return nil, fmt.Errorf("confluence_update_page: module has no client; construct it with NewWith")
+	}
 	var in updatePageArgs
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return nil, fmt.Errorf("confluence_update_page: %w", err)
@@ -170,6 +199,11 @@ func (m module) handleUpdatePage(ctx context.Context, raw json.RawMessage) (any,
 	id, err := validPageID(in.ID)
 	if err != nil {
 		return nil, fmt.Errorf("confluence_update_page: %w", err)
+	}
+	// Re-checked here for the same reason as in handleCreatePage: the handler
+	// is where the body is replaced, so it does not trust its caller's gating.
+	if !m.cfg.Domains[Domain].Destructive {
+		return nil, fmt.Errorf("confluence_update_page: replacing a page body requires the destructive capability for %s", Domain)
 	}
 	if strings.TrimSpace(in.Body) == "" {
 		return nil, fmt.Errorf("confluence_update_page: body is empty; refusing to blank the page")
@@ -278,7 +312,7 @@ func (m module) commentDecl() core.ToolDecl {
 		Description: "Add a footer comment to a Confluence page. The body is written in markdown.",
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
-				fieldPageID: stringProp("Numeric page id, sent as a string."),
+				fieldPageID: idProp("Numeric page id, sent as a string."),
 				fieldBody:   stringProp("Comment body. Markdown."),
 			}, []string{fieldPageID, fieldBody})
 		},
@@ -292,6 +326,9 @@ type commentArgs struct {
 }
 
 func (m module) handleComment(ctx context.Context, raw json.RawMessage) (any, error) {
+	if m.client == nil {
+		return nil, fmt.Errorf("confluence_comment: module has no client; construct it with NewWith")
+	}
 	var in commentArgs
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return nil, fmt.Errorf("confluence_comment: %w", err)
@@ -299,6 +336,11 @@ func (m module) handleComment(ctx context.Context, raw json.RawMessage) (any, er
 	id, err := validPageID(in.PageID)
 	if err != nil {
 		return nil, fmt.Errorf("confluence_comment: %w", err)
+	}
+	// Re-checked here for the same reason as in handleCreatePage: a comment is
+	// a write, and the handler is where it happens.
+	if !m.cfg.Domains[Domain].Write {
+		return nil, fmt.Errorf("confluence_comment: commenting requires the write capability for %s", Domain)
 	}
 	if strings.TrimSpace(in.Body) == "" {
 		return nil, fmt.Errorf("confluence_comment: body is empty")
@@ -381,8 +423,11 @@ func (m module) spaceKeyFor(ctx context.Context, id string) (string, error) {
 	if strings.TrimSpace(id) == "" {
 		return "", fmt.Errorf("the page reported no owning space, so the write allowlist cannot be checked")
 	}
-	if !rePageID.MatchString(id) {
-		return "", fmt.Errorf("invalid space id %q: expected a numeric id", id)
+	// The id came from Confluence, not the caller, but it is interpolated
+	// into a URL path all the same, so it passes the same gate.
+	id, err := validNumericID("space id", id)
+	if err != nil {
+		return "", err
 	}
 	var res struct {
 		Key string `json:"key"`

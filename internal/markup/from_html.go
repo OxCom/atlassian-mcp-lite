@@ -126,6 +126,13 @@ func render(b *strings.Builder, n *html.Node, listDepth int) {
 		if alt == "" {
 			alt = attr(n, "title")
 		}
+		// A refused target keeps the alt text so the reader knows a picture
+		// was there; the destination itself is never emitted.
+		src, ok := safeLinkTarget(src)
+		if !ok {
+			b.WriteString(escapeMarkdown(alt))
+			return
+		}
 		if src == "" && alt == "" {
 			return
 		}
@@ -167,7 +174,15 @@ func render(b *strings.Builder, n *html.Node, listDepth int) {
 	case "a":
 		var inner strings.Builder
 		renderChildren(&inner, n, listDepth)
-		b.WriteString("[" + strings.TrimSpace(inner.String()) + "](" + escapeMarkdownURL(attr(n, "href")) + ")")
+		// The children are already markdown-escaped text, so when the target
+		// is refused the label stands on its own as plain text and nothing of
+		// the destination reaches the output.
+		href, ok := safeLinkTarget(attr(n, "href"))
+		if !ok {
+			b.WriteString(strings.TrimSpace(inner.String()))
+			return
+		}
+		b.WriteString("[" + strings.TrimSpace(inner.String()) + "](" + escapeMarkdownURL(href) + ")")
 		return
 	case "dt":
 		b.WriteString("\n**")

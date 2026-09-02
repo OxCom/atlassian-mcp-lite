@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/OxCom/atlassian-mcp-lite/internal/core"
 )
 
 func TestAccountIDForResolvesEmail(t *testing.T) {
@@ -178,5 +180,103 @@ func TestVersionIDForRejectsUnsafeProjectKey(t *testing.T) {
 	}).(module)
 	if _, err := m.versionIDFor(context.Background(), "../../admin", "1.0"); err == nil {
 		t.Fatal("a project key that is not a project key must be refused before the URL is built")
+	}
+}
+
+// withoutRead returns the module with the read capability turned off. A
+// deployment configured that way has said its caller may not see Jira's data,
+// and an error message is not an exemption from that.
+func withoutRead(t *testing.T, h http.HandlerFunc) module {
+	t.Helper()
+	m := newTestModule(t, h).(module)
+	m.cfg.Domains = map[string]core.Caps{Domain: {Write: true, Destructive: true}}
+	return m
+}
+
+func TestAccountIDForAmbiguityHidesNamesWithoutRead(t *testing.T) {
+	m := withoutRead(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"accountId":"a","displayName":"Ada Lovelace"},{"accountId":"b","displayName":"Adam Smith"}]`)
+	})
+	_, err := m.accountIDFor(context.Background(), "Ada")
+	if err == nil {
+		t.Fatal("an ambiguous assignee must be an error")
+	}
+	for _, leak := range []string{"Lovelace", "Smith"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("error = %v, must not enumerate users when read is disabled", err)
+		}
+	}
+	for _, want := range []string{"2 candidates", "use an exact email address"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to carry %q", err, want)
+		}
+	}
+}
+
+// With read enabled the names help the caller, but they are still third-party
+// data: each is quoted, cut to a bounded length, and never more than five.
+func TestAccountIDForAmbiguityQuotesCapsAndTruncatesNames(t *testing.T) {
+	long := strings.Repeat("x", 100)
+	m := newTestModule(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"accountId":"a","displayName":"Ada Lovelace"},{"accountId":"b","displayName":"`+long+`"},`+
+			`{"accountId":"c","displayName":"Three"},{"accountId":"d","displayName":"Four"},{"accountId":"e","displayName":"Five"},`+
+			`{"accountId":"f","displayName":"Sixth Person"},{"accountId":"g","displayName":"Seventh Person"}]`)
+	}).(module)
+	_, err := m.accountIDFor(context.Background(), "Ada")
+	if err == nil {
+		t.Fatal("an ambiguous assignee must be an error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `"Ada Lovelace"`) {
+		t.Errorf("error = %v, want each name quoted", err)
+	}
+	if strings.Contains(msg, long) {
+		t.Errorf("error = %v, want long names truncated", err)
+	}
+	if !strings.Contains(msg, strings.Repeat("x", 80)+"…") {
+		t.Errorf("error = %v, want the truncated name to end with an ellipsis", err)
+	}
+	for _, over := range []string{"Sixth", "Seventh"} {
+		if strings.Contains(msg, over) {
+			t.Errorf("error = %v, want at most five names", err)
+		}
+	}
+	if !strings.Contains(msg, "7 candidates") {
+		t.Errorf("error = %v, want the full count even when names are capped", err)
+	}
+}
+
+func TestVersionIDForUnknownNameHidesNamesWithoutRead(t *testing.T) {
+	m := withoutRead(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"id":"111","name":"1.2.x"},{"id":"222","name":"Backlog"}]`)
+	})
+	_, err := m.versionIDFor(context.Background(), "PROJ", "nope")
+	if err == nil {
+		t.Fatal("unknown version must error")
+	}
+	for _, leak := range []string{"1.2.x", "Backlog"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("error = %v, must not enumerate versions when read is disabled", err)
+		}
+	}
+	for _, want := range []string{"2 versions", "use an exact version name"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to carry %q", err, want)
+		}
+	}
+}
+
+func TestVersionIDForUnknownNameQuotesNames(t *testing.T) {
+	m := newTestModule(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"id":"111","name":"1.2.x"},{"id":"222","name":"Backlog"}]`)
+	}).(module)
+	_, err := m.versionIDFor(context.Background(), "PROJ", "nope")
+	if err == nil {
+		t.Fatal("unknown version must error")
+	}
+	for _, want := range []string{`"1.2.x"`, `"Backlog"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want %s quoted", err, want)
+		}
 	}
 }

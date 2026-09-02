@@ -51,7 +51,15 @@ Four packages plus `cmd/atlassian-mcp-lite`:
 Tools are declared, not registered. `core.Registry.Enabled` drops any tool whose
 action classes are all disabled for its domain, so a disabled tool does not
 exist at runtime. `jira_update` spans write and destructive and builds its input
-schema from the enabled capabilities.
+schema from the enabled capabilities: `fixVersion` is the only write-class
+property, because it uses Jira's `add` verb, while `assignee`, `epic`,
+`parent`, `summary` and `description` each replace an existing value and are
+destructive.
+
+`core.NewServer` wraps every successful result as
+`{"notice": core.UntrustedNotice, "untrusted_content": ...}` and refuses a
+wrapped result above `maxResultBytes` (1 MiB) — with an error asking for a
+narrower request — rather than truncating it.
 
 `cmd/atlassian-mcp-lite/main.go` is a stdio server: stdout carries the MCP
 protocol, all logging goes to stderr. It registers declaration-only modules to
@@ -99,6 +107,18 @@ the next stage.
   reachable from this code; `gosec` covers our own code.
 - `-race` needs CGO, so `CGO_ENABLED=1` is set in the test job only; every
   build path is CGO-free.
+- **Every action is pinned to a commit SHA and every container image to a
+  digest**, with the human-readable version in a trailing comment. A tag is
+  mutable: whoever can move `v7` can run their own code in a workflow that
+  holds the release token. `.github/dependabot.yml` watches the
+  `github-actions`, `docker` and `docker-compose` ecosystems weekly and opens
+  the pull requests that move those pins forward, so pinning does not mean
+  going stale. When you add a step, pin it the same way — resolve the tag to
+  its SHA and keep the version in the comment.
+- The GitHub release is created with `gh release create "$GITHUB_REF_NAME"
+  dist/* --generate-notes --verify-tag`, using the job's own token rather than
+  a third-party publishing action. `--verify-tag` refuses a ref that is not an
+  existing tag.
 
 `gosec` is disabled inside `.golangci.yml` and runs as its own stage, so a lint
 failure and a security failure never look alike.

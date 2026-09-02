@@ -5,6 +5,10 @@ import (
 	"testing"
 )
 
+// fixtureToken satisfies validateToken's minimum length. It is obviously not a
+// credential, which keeps secret scanners quiet.
+const fixtureToken = "fixture-token-not-a-secret-0123"
+
 func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
@@ -22,7 +26,7 @@ func TestLoadRequiresEachCredentialIndependently(t *testing.T) {
 	full := map[string]string{
 		"ATLAS_BASE_URL": "https://x.atlassian.net",
 		"ATLAS_EMAIL":    "a@b.c",
-		"ATLAS_TOKEN":    "t",
+		"ATLAS_TOKEN":    fixtureToken,
 	}
 	for _, omit := range []string{"ATLAS_BASE_URL", "ATLAS_EMAIL", "ATLAS_TOKEN"} {
 		m := map[string]string{}
@@ -46,7 +50,7 @@ func TestCapabilityFlagSynonyms(t *testing.T) {
 		return Load(env(map[string]string{
 			"ATLAS_BASE_URL":  "https://x.atlassian.net",
 			"ATLAS_EMAIL":     "a@b.c",
-			"ATLAS_TOKEN":     "t",
+			"ATLAS_TOKEN":     fixtureToken,
 			"ATLAS_JIRA_READ": raw,
 		}), []string{"jira"})
 	}
@@ -78,7 +82,7 @@ func TestLoadRejectsInvalidEmail(t *testing.T) {
 		_, err := Load(env(map[string]string{
 			"ATLAS_BASE_URL": "https://x.atlassian.net",
 			"ATLAS_EMAIL":    email,
-			"ATLAS_TOKEN":    "t",
+			"ATLAS_TOKEN":    fixtureToken,
 		}), []string{"jira"})
 		return err
 	}
@@ -114,16 +118,21 @@ func TestLoadRejectsMalformedToken(t *testing.T) {
 		return err
 	}
 	for name, token := range map[string]string{
-		"newline": "abc\ndef",
-		"CR":      "abc\rdef",
-		"tab":     "abc\tdef",
-		"space":   "abc def",
-		"NUL":     "abc\x00def",
+		"newline": "abcdefghijklmnop\nqrstuvwxyz",
+		"CR":      "abcdefghijklmnop\rqrstuvwxyz",
+		"tab":     "abcdefghijklmnop\tqrstuvwxyz",
+		"space":   "abcdefghijklmnop qrstuvwxyz",
+		"NUL":     "abcdefghijklmnop\x00qrstuvwxyz",
 	} {
 		err := load(token)
 		if err == nil {
 			t.Errorf("%s token must be rejected", name)
 			continue
+		}
+		// Long enough to pass the length check, so the rejection must come
+		// from the structural rule the case is about.
+		if strings.Contains(err.Error(), "at least") {
+			t.Errorf("%s: rejected for length, not structure: %v", name, err)
 		}
 		// A validation error must never carry the credential.
 		if strings.Contains(err.Error(), "abc") {
@@ -140,7 +149,7 @@ func TestLoadValidatesEpicFieldID(t *testing.T) {
 		return Load(env(map[string]string{
 			"ATLAS_BASE_URL":      "https://x.atlassian.net",
 			"ATLAS_EMAIL":         "a@b.c",
-			"ATLAS_TOKEN":         "t",
+			"ATLAS_TOKEN":         fixtureToken,
 			"ATLAS_EPIC_FIELD_ID": v,
 		}), []string{"jira"})
 	}
@@ -168,7 +177,7 @@ func TestLoadValidatesAllowlistKeys(t *testing.T) {
 			if _, err := Load(env(map[string]string{
 				"ATLAS_BASE_URL": "https://x.atlassian.net",
 				"ATLAS_EMAIL":    "a@b.c",
-				"ATLAS_TOKEN":    "t",
+				"ATLAS_TOKEN":    fixtureToken,
 				name:             raw,
 			}), []string{"jira"}); err == nil {
 				t.Errorf("%s=%q must be rejected", name, raw)
@@ -179,7 +188,7 @@ func TestLoadValidatesAllowlistKeys(t *testing.T) {
 	if _, err := Load(env(map[string]string{
 		"ATLAS_BASE_URL":     "https://x.atlassian.net",
 		"ATLAS_EMAIL":        "a@b.c",
-		"ATLAS_TOKEN":        "t",
+		"ATLAS_TOKEN":        fixtureToken,
 		"ATLAS_WRITE_SPACES": "~712020abc, DOCS_1",
 	}), []string{"confluence"}); err != nil {
 		t.Errorf("personal space key must be accepted: %v", err)
@@ -191,7 +200,7 @@ func TestLoadValidatesDomainNames(t *testing.T) {
 		_, err := Load(env(map[string]string{
 			"ATLAS_BASE_URL": "https://x.atlassian.net",
 			"ATLAS_EMAIL":    "a@b.c",
-			"ATLAS_TOKEN":    "t",
+			"ATLAS_TOKEN":    fixtureToken,
 		}), domains)
 		return err
 	}
@@ -222,7 +231,7 @@ func TestLoadDerivesDomainCaps(t *testing.T) {
 	cfg, err := Load(env(map[string]string{
 		"ATLAS_BASE_URL":         "https://x.atlassian.net",
 		"ATLAS_EMAIL":            "a@b.c",
-		"ATLAS_TOKEN":            "t",
+		"ATLAS_TOKEN":            fixtureToken,
 		"ATLAS_JIRA_READ":        "true",
 		"ATLAS_JIRA_WRITE":       "true",
 		"ATLAS_JIRA_DESTRUCTIVE": "false",
@@ -245,7 +254,7 @@ func TestCapabilityDefaultsAreReadOnly(t *testing.T) {
 	cfg, err := Load(env(map[string]string{
 		"ATLAS_BASE_URL": "https://x.atlassian.net",
 		"ATLAS_EMAIL":    "a@b.c",
-		"ATLAS_TOKEN":    "t",
+		"ATLAS_TOKEN":    fixtureToken,
 	}), []string{"jira", "confluence"})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -259,7 +268,7 @@ func TestCapabilityDefaultsAreReadOnly(t *testing.T) {
 	cfg, err = Load(env(map[string]string{
 		"ATLAS_BASE_URL":  "https://x.atlassian.net",
 		"ATLAS_EMAIL":     "a@b.c",
-		"ATLAS_TOKEN":     "t",
+		"ATLAS_TOKEN":     fixtureToken,
 		"ATLAS_JIRA_READ": "false",
 	}), []string{"jira"})
 	if err != nil {
@@ -277,7 +286,7 @@ func TestAllowlistUnsetAndEmptyAreUnrestricted(t *testing.T) {
 	} {
 		m["ATLAS_BASE_URL"] = "https://x.atlassian.net"
 		m["ATLAS_EMAIL"] = "a@b.c"
-		m["ATLAS_TOKEN"] = "t"
+		m["ATLAS_TOKEN"] = fixtureToken
 		cfg, err := Load(env(m), []string{"jira"})
 		if err != nil {
 			t.Fatalf("%s: Load: %v", name, err)
@@ -292,7 +301,7 @@ func TestAllowlistNonEmptyIsStrict(t *testing.T) {
 	cfg, err := Load(env(map[string]string{
 		"ATLAS_BASE_URL":       "https://x.atlassian.net",
 		"ATLAS_EMAIL":          "a@b.c",
-		"ATLAS_TOKEN":          "t",
+		"ATLAS_TOKEN":          fixtureToken,
 		"ATLAS_WRITE_PROJECTS": "PROJ, CEM",
 	}), []string{"jira"})
 	if err != nil {
@@ -313,7 +322,7 @@ func TestSpaceAllowlist(t *testing.T) {
 	base := map[string]string{
 		"ATLAS_BASE_URL": "https://x.atlassian.net",
 		"ATLAS_EMAIL":    "a@b.c",
-		"ATLAS_TOKEN":    "t",
+		"ATLAS_TOKEN":    fixtureToken,
 	}
 	cfg, err := Load(env(base), []string{"confluence"})
 	if err != nil {
@@ -342,7 +351,7 @@ func TestProjectAndSpaceAllowlistsAreIndependent(t *testing.T) {
 	cfg, err := Load(env(map[string]string{
 		"ATLAS_BASE_URL":       "https://x.atlassian.net",
 		"ATLAS_EMAIL":          "a@b.c",
-		"ATLAS_TOKEN":          "t",
+		"ATLAS_TOKEN":          fixtureToken,
 		"ATLAS_WRITE_PROJECTS": "PROJ",
 		"ATLAS_WRITE_SPACES":   "DOCS",
 	}), []string{"jira", "confluence"})
@@ -365,7 +374,7 @@ func TestAllowlistWithNoUsableKeysIsRejected(t *testing.T) {
 			_, err := Load(env(map[string]string{
 				"ATLAS_BASE_URL": "https://x.atlassian.net",
 				"ATLAS_EMAIL":    "a@b.c",
-				"ATLAS_TOKEN":    "t",
+				"ATLAS_TOKEN":    fixtureToken,
 				name:             raw,
 			}), []string{"jira"})
 			if raw == "  " {
@@ -386,7 +395,7 @@ func TestLogLevel(t *testing.T) {
 		return Load(env(map[string]string{
 			"ATLAS_BASE_URL": "https://x.atlassian.net",
 			"ATLAS_EMAIL":    "a@b.c",
-			"ATLAS_TOKEN":    "t",
+			"ATLAS_TOKEN":    fixtureToken,
 			"ATLAS_LOG":      v,
 		}), []string{"jira"})
 	}
@@ -414,7 +423,7 @@ func TestLimitValidation(t *testing.T) {
 		return Load(env(map[string]string{
 			"ATLAS_BASE_URL":      "https://x.atlassian.net",
 			"ATLAS_EMAIL":         "a@b.c",
-			"ATLAS_TOKEN":         "t",
+			"ATLAS_TOKEN":         fixtureToken,
 			"ATLAS_LIMIT_DEFAULT": def,
 			"ATLAS_LIMIT_MAX":     max,
 		}), []string{"jira"})
@@ -454,7 +463,7 @@ func TestLimitDefaults(t *testing.T) {
 	cfg, _ := Load(env(map[string]string{
 		"ATLAS_BASE_URL": "https://x.atlassian.net",
 		"ATLAS_EMAIL":    "a@b.c",
-		"ATLAS_TOKEN":    "t",
+		"ATLAS_TOKEN":    fixtureToken,
 	}), []string{"jira"})
 	if cfg.LimitDefault != 20 || cfg.LimitMax != 50 {
 		t.Errorf("limits = %d/%d, want 20/50", cfg.LimitDefault, cfg.LimitMax)
@@ -479,7 +488,7 @@ func TestLoadRejectsUnsafeBaseURLs(t *testing.T) {
 		_, err := Load(env(map[string]string{
 			"ATLAS_BASE_URL": raw,
 			"ATLAS_EMAIL":    "a@b.c",
-			"ATLAS_TOKEN":    "t",
+			"ATLAS_TOKEN":    fixtureToken,
 		}), []string{"jira"})
 		if err == nil {
 			t.Errorf("%s (%q) must be rejected", name, raw)
@@ -492,7 +501,7 @@ func TestLoadAllowsHTTPForLoopbackSoTestsCanRun(t *testing.T) {
 		if _, err := Load(env(map[string]string{
 			"ATLAS_BASE_URL": raw,
 			"ATLAS_EMAIL":    "a@b.c",
-			"ATLAS_TOKEN":    "t",
+			"ATLAS_TOKEN":    fixtureToken,
 		}), []string{"jira"}); err != nil {
 			t.Errorf("%q must be accepted: %v", raw, err)
 		}
@@ -503,9 +512,46 @@ func TestBaseURLTrailingSlashStripped(t *testing.T) {
 	cfg, _ := Load(env(map[string]string{
 		"ATLAS_BASE_URL": "https://x.atlassian.net/",
 		"ATLAS_EMAIL":    "a@b.c",
-		"ATLAS_TOKEN":    "t",
+		"ATLAS_TOKEN":    fixtureToken,
 	}), []string{"jira"})
 	if cfg.BaseURL != "https://x.atlassian.net" {
 		t.Errorf("BaseURL = %q, want no trailing slash", cfg.BaseURL)
+	}
+}
+
+// A short token is far more likely to be a placeholder or a truncated paste
+// than a real credential, and a placeholder that passes validation fails only
+// on the first request, with a 401 that names nothing useful. The rule is on
+// runes, so the check matches how the operator counts characters.
+func TestLoadRejectsShortToken(t *testing.T) {
+	load := func(token string) error {
+		_, err := Load(env(map[string]string{
+			"ATLAS_BASE_URL": "https://x.atlassian.net",
+			"ATLAS_EMAIL":    "a@b.c",
+			"ATLAS_TOKEN":    token,
+		}), []string{"jira"})
+		return err
+	}
+
+	short := strings.Repeat("s", 15)
+	err := load(short)
+	if err == nil {
+		t.Fatal("a 15-character token must be rejected")
+	}
+	if !strings.Contains(err.Error(), "must be at least 16 characters") {
+		t.Errorf("error = %v, want the minimum stated", err)
+	}
+	if strings.Contains(err.Error(), short) {
+		t.Errorf("error quotes the token: %v", err)
+	}
+	if err := load(strings.Repeat("s", 16)); err != nil {
+		t.Errorf("a 16-character token must be accepted: %v", err)
+	}
+	// Runes, not bytes: 15 two-byte characters is 30 bytes and still too short.
+	if err := load(strings.Repeat("é", 15)); err == nil {
+		t.Error("15 multi-byte characters must still be rejected")
+	}
+	if err := load(strings.Repeat("é", 16)); err != nil {
+		t.Errorf("16 multi-byte characters must be accepted: %v", err)
 	}
 }

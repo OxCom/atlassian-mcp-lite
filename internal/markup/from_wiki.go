@@ -231,7 +231,17 @@ func inlineFromWiki(s string) string {
 		})
 	}
 	protect(reWikiCode, func(g []string) string { return "`" + g[1] + "`" })
-	protect(reWikiLink, func(g []string) string { return "[" + g[1] + "](" + g[2] + ")" })
+	protect(reWikiLink, func(g []string) string {
+		// Same allowlist as the HTML reader: the target is issue text and goes
+		// to the model as a markdown link, so a "javascript:" or "data:"
+		// destination is dropped and only the label survives, escaped so it
+		// cannot turn into markup once it is no longer inside a link.
+		target, ok := safeLinkTarget(g[2])
+		if !ok {
+			return escapeMarkdown(g[1])
+		}
+		return "[" + g[1] + "](" + target + ")"
+	})
 
 	s = reWikiBold.ReplaceAllString(s, "**$1**")
 	s = reWikiItalic.ReplaceAllString(s, "*$1*")

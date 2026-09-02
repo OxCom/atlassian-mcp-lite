@@ -12,7 +12,7 @@ x-go: &go
   # ships neither, which previously forced -race into a separate service on a
   # second image. The codename is pinned because the bare `golang:1.27` tag
   # follows Debian stable and would change base distribution under us.
-  image: golang:1.27-trixie
+  image: golang:1.27-trixie@sha256:6fa523b3b5f87910a5712ae234ff8b94d80fb99c7b4f94754b135553d8c5588f
   working_dir: /src
   volumes:
     - .:/src
@@ -52,7 +52,7 @@ services:
 
   # --- lint ---
   lint:
-    image: golangci/golangci-lint:v2.13.2
+    image: golangci/golangci-lint:v2.13.2@sha256:ba07dffad130794ae79ebaa0056809d18c0168f3f846480ffd3eb6c04578b83d
     working_dir: /src
     volumes:
       - .:/src
@@ -61,7 +61,7 @@ services:
     command: golangci-lint run --timeout 5m
 
   fmt:
-    image: golangci/golangci-lint:v2.13.2
+    image: golangci/golangci-lint:v2.13.2@sha256:ba07dffad130794ae79ebaa0056809d18c0168f3f846480ffd3eb6c04578b83d
     working_dir: /src
     volumes:
       - .:/src
@@ -86,14 +86,14 @@ services:
 
   # Secret scanning: committed files and full git history.
   gitleaks:
-    image: ghcr.io/gitleaks/gitleaks:v8.30.1
+    image: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
     working_dir: /src
     volumes:
       - .:/src
     command: detect --source=/src --redact --verbose
 
   trufflehog:
-    image: trufflesecurity/trufflehog:3.97.1
+    image: trufflesecurity/trufflehog:3.97.1@sha256:deb2af10659a488a14d262a323addcde099d99827a1cf1dc4e93c17915c39f08
     working_dir: /src
     volumes:
       - .:/src

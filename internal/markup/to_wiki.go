@@ -9,6 +9,7 @@
 package markup
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -20,6 +21,14 @@ import (
 )
 
 var mdParser = goldmark.New(goldmark.WithExtensions(extension.Table))
+
+// codeLangRe is the shape of a code macro language parameter. The fence info
+// string is written into "{code:...}" as a macro parameter, not as content, so
+// it cannot be escaped — and unvalidated, a "}" in it closes the macro on the
+// opening line, which turns the whole code body into live markup and leaves the
+// trailing "{code}" to open a second macro that swallows everything after it.
+// An info string that is not a plain language name is dropped, not escaped.
+var codeLangRe = regexp.MustCompile(`^[A-Za-z0-9_+#.-]{1,32}$`)
 
 // ToWiki converts a markdown document to Atlassian wiki markup.
 func ToWiki(md string) string {
@@ -92,7 +101,7 @@ func writeBlock(b *strings.Builder, n ast.Node, src []byte, listPrefix string) {
 
 	case *ast.FencedCodeBlock:
 		lang := string(node.Language(src))
-		if lang != "" {
+		if codeLangRe.MatchString(lang) {
 			b.WriteString("{code:" + lang + "}\n")
 		} else {
 			b.WriteString("{code}\n")
@@ -261,12 +270,21 @@ func writeInline(b *strings.Builder, n ast.Node, src []byte) {
 			// Not in the subset, but the contract is never to drop content, so
 			// the literal source is emitted.
 			//
+			// Escaped like any other text, for the same reason as an HTMLBlock:
+			// inline HTML is content the author typed, not markup this converter
+			// produced, and passing it through raw was a hole straight past the
+			// escaper — "{code}" in a title attribute or a comment body opened a
+			// live macro. Angle brackets mean nothing to wiki, so ordinary HTML
+			// is unchanged.
+			//
 			// Segment.Value has a pointer receiver, so the segment cannot be
 			// written inline from the accessor's return value.
+			var raw strings.Builder
 			for i := 0; i < node.Segments.Len(); i++ {
 				seg := node.Segments.At(i)
-				b.Write(seg.Value(src))
+				raw.Write(seg.Value(src))
 			}
+			b.WriteString(escapeWiki(raw.String()))
 		default:
 			// Unknown inline: recurse so its text survives.
 			writeInline(b, c, src)

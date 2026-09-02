@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -26,6 +27,12 @@ const (
 	// maxErrorBody caps how much of a failing response is read. Error bodies
 	// are logged, so an HTML proxy page must not be able to flood the log.
 	maxErrorBody = 8 << 10 // 8 KiB
+
+	// maxRawMessageBytes caps the raw-body fallback of upstreamMessage. A body
+	// that is not Atlassian's JSON is a proxy or login page, and 8 KiB of HTML
+	// is not a diagnostic: the first few hundred bytes identify it, and the
+	// rest only pads a log line and a tool result.
+	maxRawMessageBytes = 512
 
 	// maxResponseBody caps a successful response. The whole body is buffered to
 	// decode it, so without a cap a runaway or hostile response is a memory
@@ -419,13 +426,40 @@ func upstreamMessage(raw []byte) string {
 			parts = append(parts, shape.Message)
 		}
 		if len(parts) > 0 {
+			// Every part is third-party text, so each is capped and quoted
+			// exactly as the raw-body branch below does: a newline in
+			// errorMessages[0] would otherwise forge a second log entry, and
+			// an unbounded message would push the cap out of the log line.
+			// Quoted per part rather than after the join, so the separator
+			// stays readable and one long part cannot swallow the others.
+			for i, p := range parts {
+				parts[i] = strconv.Quote(truncateRunes(p, maxRawMessageBytes))
+			}
 			return strings.Join(parts, "; ")
 		}
 	}
 	if s := strings.TrimSpace(string(raw)); s != "" {
-		return s
+		// Quoted, so a newline or a control character in the body cannot reach
+		// a log line or the model raw: a newline would let the body forge a
+		// second log entry, and the quoted form is still readable. Capped
+		// first, so the escaping has a bounded amount to work on.
+		return strconv.Quote(truncateRunes(s, maxRawMessageBytes))
 	}
 	return "(empty error body)"
+}
+
+// truncateRunes cuts s to at most limit bytes on a rune boundary and marks the
+// cut with an ellipsis. Cutting on a byte boundary would split a multi-byte
+// character, and strconv.Quote would then render the fragment as \x escapes.
+func truncateRunes(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 // errorDetails reads both shapes Atlassian uses for the "errors" member: Jira's

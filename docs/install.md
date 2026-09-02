@@ -25,7 +25,9 @@ and follow docs/install.md exactly.
 - **Recommend the safe default.** Read on, write and destructive off. Do not
   pre-select write or destructive.
 - **Do not skip the permission step.** The server refuses a config file whose
-  mode is not exactly `0600` (or `0400`).
+  mode is not exactly `0600` (or `0400`). It also refuses a symbolic link and a
+  file owned by anyone but the user the server runs as, so write the real file
+  in the user's own home directory rather than linking to one elsewhere.
 - **Do not run the server against the real site to "test" it** until the user
   has filled in the token. A startup check with placeholders is fine and is
   expected to fail with a clear configuration error.
@@ -50,8 +52,8 @@ classes with their meaning; pre-select **read only**:
 > What may the assistant do in **Jira**?
 >
 > - [x] read — search and view issues; changes nothing
-> - [ ] write — comment, assign, set fix version, epic and parent; additive and reversible
-> - [ ] destructive — change summary and description, move issues between statuses
+> - [ ] write — comment and add a fix version; additive and reversible
+> - [ ] destructive — reassign, change the epic or parent, change summary and description, move issues between statuses
 
 > What may the assistant do in **Confluence**?
 >
@@ -67,6 +69,10 @@ If the user picks write or destructive for a product, ask one follow-up:
 
 > Restrict **Confluence** writes to specific spaces? Enter space keys separated
 > by commas (for example `ENG,~jdoe`), or leave empty to allow every space.
+
+An allowlist also covers the other end of a link: an `epic` or `parent` given
+to `jira_update` must be in a listed project, and a `parent_id` given to
+`confluence_create_page` must be in the space the call names.
 
 Explain in one line that the token has the full authority of its account and
 that on a shared site the allowlist is the only thing stopping an unwanted edit
@@ -86,7 +92,9 @@ Do not ask for the token. Tell the user how to create one:
 > Create an API token at
 > <https://id.atlassian.com/manage-profile/security/api-tokens>
 > (**Create API token**, give it a label and an expiry, **Copy**). You will
-> paste it into the config file yourself in the next step.
+> paste it into the config file yourself in the next step. The server requires
+> at least 16 characters, which every real Atlassian token exceeds — a short
+> value means something was truncated on the way in.
 
 ## Step 4 — Write the config file
 
@@ -131,7 +139,9 @@ Then tell the user, verbatim:
 
 > Open `~/.config/atlassian-mcp-lite/env` in your editor and replace
 > `REPLACE_WITH_YOUR_API_TOKEN` with the token you created. Keep the file mode
-> `0600`; the server refuses to start otherwise.
+> `0600`; the server refuses to start otherwise. Keep the key names uppercase as
+> written, and do not set the same key twice in the file — a duplicate is an
+> error, not last-one-wins.
 
 ## Step 5 — Build or pull the image
 
@@ -194,7 +204,9 @@ docker run --rm -i --user "$(id -u):$(id -g)" \
 
 With the placeholder token still in place this exits with a configuration
 error, which is expected. With a real token it waits for input and exits
-quietly on EOF. A permission error prints the exact `chmod` to run.
+quietly on EOF. A permission error prints the exact `chmod` to run. An error
+about ownership means the uid passed to `--user` does not own the mounted
+file; `$(id -u):$(id -g)` above is the uid that does.
 
 Finish with this note to the user, adjusted to what was chosen:
 

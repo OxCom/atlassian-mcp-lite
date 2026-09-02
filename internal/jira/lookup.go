@@ -83,8 +83,57 @@ func (m module) accountIDFor(ctx context.Context, query string) (string, error) 
 	case len(users) == 1 && strings.Contains(query, "@"):
 		return users[0].AccountID, nil
 	}
-	return "", fmt.Errorf("%q does not identify exactly one Atlassian user (%d candidates: %s); use an exact email address",
-		query, len(users), strings.Join(names, ", "))
+	return "", fmt.Errorf("%q does not identify exactly one Atlassian user (%d candidates%s); use an exact email address",
+		query, len(users), m.candidateSuffix(quoteNames(names)))
+}
+
+// maxCandidateNames and maxCandidateRunes bound what an error may echo back
+// from Jira: at most this many names, each cut to this many characters. The
+// names help a caller pick the right one, but they are third-party data and an
+// error message is not a place for an unbounded dump of it.
+const (
+	maxCandidateNames = 5
+	maxCandidateRunes = 80
+)
+
+// candidateSuffix renders the candidates an error may list, or nothing at all.
+//
+// A deployment with read turned off has said its caller may not see Jira's
+// data. Listing users, versions or transitions in a write error would hand
+// that data over anyway, one failed write at a time, so without read the error
+// carries only the count and the hint. With read on, the list is capped and the
+// items are expected to be already quoted (see quoteNames), so a name cannot
+// masquerade as part of the message.
+func (m module) candidateSuffix(items []string) string {
+	if !m.cfg.Domains[Domain].Read || len(items) == 0 {
+		return ""
+	}
+	if len(items) > maxCandidateNames {
+		items = items[:maxCandidateNames]
+	}
+	return ": " + strings.Join(items, ", ")
+}
+
+// quoteNames truncates each name to maxCandidateRunes and quotes it, so a name
+// that is long, or that contains punctuation the message itself uses, is still
+// readable as a single value chosen by someone else.
+func quoteNames(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		out = append(out, fmt.Sprintf("%q", truncateRunes(n, maxCandidateRunes)))
+	}
+	return out
+}
+
+// truncateRunes cuts s to at most n characters, marking the cut with an
+// ellipsis. Characters rather than bytes, so a multi-byte name is not split
+// inside a rune.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // versionIDFor resolves a version name to its id within a project.
@@ -137,6 +186,6 @@ func (m module) versionIDFor(ctx context.Context, projectKey, name string) (stri
 	if len(available) == 0 {
 		return "", fmt.Errorf("no version named %q in %s; the project has no versions", name, projectKey)
 	}
-	return "", fmt.Errorf("no version named %q in %s; available: %s",
-		name, projectKey, strings.Join(available, ", "))
+	return "", fmt.Errorf("no version named %q in %s (%d versions%s); use an exact version name",
+		name, projectKey, len(available), m.candidateSuffix(quoteNames(available)))
 }

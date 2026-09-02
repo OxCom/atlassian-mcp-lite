@@ -59,7 +59,7 @@ func (m module) searchDecl() core.ToolDecl {
 	return core.ToolDecl{
 		Name:        "jira_search",
 		Actions:     []core.Action{core.ActionRead},
-		Description: "Search Jira issues with JQL. Returns a compact field set by default.",
+		Description: "Search Jira issues with JQL. Returns a compact field set by default." + descThirdParty,
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
 				"jql":       {Type: typeString, Description: "A JQL query."},
@@ -171,7 +171,7 @@ func (m module) getDecl() core.ToolDecl {
 	return core.ToolDecl{
 		Name:        "jira_get",
 		Actions:     []core.Action{core.ActionRead},
-		Description: "Get one Jira issue. The description is returned as markdown.",
+		Description: "Get one Jira issue. The description is returned as markdown." + descThirdParty,
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
 				fieldKey:    {Type: typeString, Description: descIssueKey},
@@ -243,8 +243,11 @@ func (m module) handleGet(ctx context.Context, raw json.RawMessage) (any, error)
 //     Skipping it would make "unassigned" look identical to a field Jira never
 //     sent, which is what an unknown field name produces.
 //   - present and understood — the flattened scalar.
-//   - present and not understood — the raw JSON, passed through. A shape this
-//     code cannot read is still data, and null would assert the field is empty.
+//   - present and not understood — the value Jira sent, decoded and run through
+//     scrubPassthrough rather than handed over verbatim, so an unexpected shape
+//     cannot become the way around the reducers that drop embedded email
+//     addresses. A shape this code cannot read is still data, and null would
+//     assert the field is empty.
 func (m module) flatten(key string, fields map[string]json.RawMessage) map[string]any {
 	out := map[string]any{fieldKey: key}
 	for name, raw := range fields {
@@ -279,16 +282,56 @@ func (m module) flatten(key string, fields map[string]json.RawMessage) map[strin
 		default:
 			var g any
 			if json.Unmarshal(raw, &g) == nil {
-				v, ok = g, true
+				v, ok = scrubPassthrough(g), true
 			}
 		}
 		if !ok {
-			out[name] = raw
+			// A known field in a shape the reducer could not read is still
+			// passed through, but as decoded and scrubbed JSON: the shape was
+			// unexpected, which is no reason to let an embedded user through
+			// with the email the reducer would have dropped.
+			var g any
+			if json.Unmarshal(raw, &g) == nil {
+				out[name] = scrubPassthrough(g)
+			} else {
+				out[name] = raw
+			}
 			continue
 		}
 		out[name] = v
 	}
 	return out
+}
+
+// scrubPassthrough removes personal data from a field this code does not
+// understand and would otherwise hand over verbatim.
+//
+// The known-field reducers (personValue and friends) return only a display
+// name and account id. But Jira embeds a full user object — email address,
+// avatar URLs, a self link — wherever a person appears: comment authors,
+// worklog authors, watchers, custom user pickers, and whatever "*all" brings
+// back. Passing those fields through raw would make the passthrough the way
+// around the reducers. So every map that carries an accountId loses its
+// emailAddress, and every map loses avatarUrls and self, which are never useful
+// to a model and point back at the site's own user and object endpoints. The
+// walk mutates in place; the value was decoded for this call alone.
+func scrubPassthrough(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		delete(t, "avatarUrls")
+		delete(t, "self")
+		if _, isUser := t["accountId"]; isUser {
+			delete(t, "emailAddress")
+		}
+		for k, child := range t {
+			t[k] = scrubPassthrough(child)
+		}
+	case []any:
+		for i, child := range t {
+			t[i] = scrubPassthrough(child)
+		}
+	}
+	return v
 }
 
 // unavailableFields lists the field names the caller asked for that Jira did

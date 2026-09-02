@@ -121,7 +121,7 @@ off, the server refuses to start rather than serving an empty tool list.
 |---|---|---|
 | `jira_search` | read | JQL search, compact default field set |
 | `jira_get` | read | One issue, description as markdown |
-| `jira_update` | write + destructive | Assignee, fix version, epic, parent; summary and description only when destructive is enabled |
+| `jira_update` | write + destructive | Adds a fix version with write; replaces assignee, epic, parent, summary or description only when destructive is enabled |
 | `jira_transition` | destructive | Move an issue to another status by name |
 | `jira_comment` | write | Add a comment |
 | `confluence_search` | read | CQL search |
@@ -133,9 +133,12 @@ off, the server refuses to start rather than serving an empty tool list.
 The three classes mean:
 
 - **read** — returns data, changes nothing.
-- **write** — additive and reversible: comment, assign, set a field, create a page.
-- **destructive** — overwrites or moves state that is hard to recover: summary,
-  description, status transition, page body replacement.
+- **write** — additive and reversible: add a comment, add a fix version, create
+  a page.
+- **destructive** — overwrites or moves state that is hard to recover: assignee,
+  epic link, parent, summary, description, status transition, page body
+  replacement. Each of these replaces a value the issue already holds, and
+  nothing records what that value was.
 
 Tools speak markdown. Atlassian does not accept markdown over REST, so the
 server converts markdown to wiki markup on the way in, and wiki markup or
@@ -181,7 +184,13 @@ ATLAS_WRITE_SPACES=ENG,~jdoe         # Confluence space keys; ~ marks a personal
 
 A non-empty list is strict: a write or destructive call aimed anywhere else is
 refused before any request is made, and a move into or out of a listed
-project or space is refused too. Reads are never restricted — search and get
+project or space is refused too. The check follows the issue rather than the
+key: because Jira keeps every old key working after an issue moves, the
+project the issue is in *now* is what is checked. An `epic` or `parent` key
+passed to `jira_update` must be in an allowed project too, since linking gives
+that issue a child in its own hierarchy. For the same reason
+`confluence_create_page` refuses a `parent_id` whose page is in a different
+space from the one requested: a child page is created in its parent's space. Reads are never restricted — search and get
 see whatever the account sees. Matching is case-insensitive. A list that is set
 but names no keys (`,`) is a startup error, not "allow everything".
 
@@ -194,7 +203,10 @@ an unwanted edit somewhere else.
 Configuration is a private env file named by `ATLAS_ENV_FILE`, or plain
 environment variables. **The file must be mode `0600` or stricter**: on Linux
 and macOS the server refuses to start otherwise and prints the exact `chmod`
-to run. Process environment overrides the file, value by value.
+to run. It must also be a regular file — never a symbolic link — and owned by
+the user the server runs as. Setting the same key twice in it is an error
+rather than last-one-wins. Process environment overrides the file, value by
+value.
 
 The short version:
 
@@ -202,7 +214,7 @@ The short version:
 |---|---|---|
 | `ATLAS_BASE_URL` | required | `https://your-domain.atlassian.net` |
 | `ATLAS_EMAIL` | required | Account email |
-| `ATLAS_TOKEN` | required | Atlassian API token |
+| `ATLAS_TOKEN` | required | Atlassian API token, at least 16 characters |
 | `ATLAS_JIRA_READ` / `ATLAS_CONFLUENCE_READ` | `true` | Read tools |
 | `ATLAS_JIRA_WRITE` / `ATLAS_CONFLUENCE_WRITE` | `false` | Write tools |
 | `ATLAS_JIRA_DESTRUCTIVE` / `ATLAS_CONFLUENCE_DESTRUCTIVE` | `false` | Destructive tools |
@@ -221,7 +233,10 @@ key — are in [`docs/configuration.md`](docs/configuration.md).
   applies token scopes to OAuth, not to Basic auth. Use a dedicated service
   account whose project and space permissions are limited to what you need.
 - **The config file is refused unless it is private.** Anything other than
-  owner-only permissions is a startup error, because the file is the token.
+  owner-only permissions is a startup error, because the file is the token. So
+  is a symbolic link, whose owner would decide what the server actually reads,
+  and a file belonging to another user, which would be their credential rather
+  than yours.
 - **Set the write allowlists.** See the section above. Unset means
   unrestricted, which is rarely what you want in a shared site.
 - **The image is minimal by construction.** The binary is CGO-free and static,
@@ -236,6 +251,16 @@ key — are in [`docs/configuration.md`](docs/configuration.md).
   `ATLAS_BASE_URL` is validated at startup and no tool accepts a URL, so model
   output cannot choose a destination. Outbound filtering, if you want it, is an
   operator control: a proxy-only Docker network or host firewall rules.
+- **Every result is labelled untrusted.** A successful tool result is wrapped
+  as `{"notice": ..., "untrusted_content": ...}`, where the notice states that
+  the payload is third-party data from Atlassian and not instructions. Links in
+  converted content are limited to `http`, `https` and `mailto`; a target with
+  any other scheme is rendered as plain text, so a `javascript:` or `data:` URL
+  planted in a page never becomes a link the model or your client can follow.
+- **A result above 1 MiB is refused, not truncated.** The limit is measured on
+  the wrapped result, and the error asks for a narrower request. A cut JSON
+  document is worse than none, because the model cannot tell where the cut
+  fell.
 - **Logs go to stderr and never contain credentials.** The token and the
   Base64 Basic credential derived from it are both registered with the logger
   for redaction. Successful response bodies are not logged at any level;

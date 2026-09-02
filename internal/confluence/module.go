@@ -21,6 +21,11 @@ const Domain = "confluence"
 // limits, ids — and an unbounded query would be the only exception.
 const maxCQLLen = 4096
 
+// maxIDLen bounds a numeric content or space id. The digit pattern alone
+// accepts a string of any length, so without this a megabyte of "9" would
+// satisfy it and reach a URL path. Confluence ids are far shorter than this.
+const maxIDLen = 20
+
 // The Confluence v2 field names this package reads, writes and advertises.
 // They are constants because the same name appears in a tool schema, in a
 // request body and in a returned map, and a typo in any one of those three is
@@ -42,6 +47,20 @@ const (
 // number would lose precision silently.
 func stringProp(description string) *jsonschema.Schema {
 	return &jsonschema.Schema{Type: "string", Description: description}
+}
+
+// boundedProp is a string property that advertises the bound its handler
+// enforces, so a compliant client can refuse locally instead of discovering
+// the limit through an error.
+func boundedProp(description string, maxLen int) *jsonschema.Schema {
+	p := stringProp(description)
+	p.MaxLength = &maxLen
+	return p
+}
+
+// idProp is a numeric-id property, bounded by maxIDLen.
+func idProp(description string) *jsonschema.Schema {
+	return boundedProp(description, maxIDLen)
 }
 
 // rePageID matches Confluence's numeric content ids. Enforced before any id
@@ -74,9 +93,20 @@ func (m module) Tools() []core.ToolDecl {
 }
 
 func validPageID(id string) (string, error) {
+	return validNumericID("page id", id)
+}
+
+// validNumericID is the one gate every id passes before it reaches a URL path
+// or a request body, whether the caller supplied it or Confluence did. The
+// length is checked first and the value is not echoed on that path: an
+// over-long id is exactly the input an error message should not reflect.
+func validNumericID(kind, id string) (string, error) {
 	id = strings.TrimSpace(id)
+	if len(id) > maxIDLen {
+		return "", fmt.Errorf("%s is %d bytes, limit is %d", kind, len(id), maxIDLen)
+	}
 	if !rePageID.MatchString(id) {
-		return "", fmt.Errorf("invalid page id %q: expected a numeric id", id)
+		return "", fmt.Errorf("invalid %s %q: expected a numeric id", kind, id)
 	}
 	return id, nil
 }

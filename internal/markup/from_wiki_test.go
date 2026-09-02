@@ -203,3 +203,31 @@ func TestFromWikiLinkInsideTableCellIsNotSplit(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// A wiki link target is copied into markdown for the model. The same scheme
+// allowlist as the HTML reader applies: an unsafe target is dropped and the
+// label is kept as text.
+func TestFromWikiUnsafeLinkKeepsLabelDropsTarget(t *testing.T) {
+	for _, c := range []struct{ in, forbid string }{
+		{"[click|javascript:alert(1)]", "javascript"},
+		{"[click| JAVASCRIPT:alert(1)]", "JAVASCRIPT"},
+		{"[click|java\tscript:x]", "script:"},
+		{"[click|data:text/html,x]", "data:"},
+	} {
+		got := FromWiki(c.in)
+		if !strings.Contains(got, "click") || strings.Contains(got, c.forbid) || strings.Contains(got, "](") {
+			t.Errorf("FromWiki(%q) = %q, want plain label with no link", c.in, got)
+		}
+	}
+	for in, want := range map[string]string{
+		"[t|https://ok.example/a(b)]": "[t](https://ok.example/a(b))",
+		"[t|/wiki/spaces/X]":          "[t](/wiki/spaces/X)",
+		"[t|mailto:a@b.c]":            "[t](mailto:a@b.c)",
+		"[t|#top]":                    "[t](#top)",
+		"[t|foo/bar:baz]":             "[t](foo/bar:baz)",
+	} {
+		if got := FromWiki(in); got != want {
+			t.Errorf("FromWiki(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

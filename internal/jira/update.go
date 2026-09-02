@@ -26,10 +26,10 @@ const (
 func (m module) updateDecl() core.ToolDecl {
 	return core.ToolDecl{
 		Name: "jira_update",
-		// Spans two classes: the additive fields are write; summary and
-		// description are destructive. Declaring both means the tool still
-		// registers when only one class is enabled, carrying just that
-		// class's properties.
+		// Spans two classes: fixVersion is the one additive field and is write;
+		// everything else replaces a value the issue already holds and is
+		// destructive. Declaring both means the tool still registers when only
+		// one class is enabled, carrying just that class's properties.
 		Actions: []core.Action{core.ActionWrite, core.ActionDestructive},
 		Description: "Update fields on a Jira issue. Bodies are written in markdown. " +
 			"Which fields are accepted depends on the server's enabled capabilities. " +
@@ -42,19 +42,23 @@ func (m module) updateDecl() core.ToolDecl {
 			props := map[string]*jsonschema.Schema{
 				fieldKey: {Type: typeString, Description: descIssueKey},
 			}
-			// Additive, reversible fields.
+			// Additive, reversible: fixVersion uses Jira's `add` verb, so the
+			// versions already on the issue survive and the change can be undone
+			// by removing one entry.
 			if c.Write {
-				props["assignee"] = &jsonschema.Schema{Type: typeString,
-					Description: "Assignee email address, or an exact display name."}
 				props["fixVersion"] = &jsonschema.Schema{Type: typeString,
 					Description: "Fix version name, resolved to its id and ADDED to the issue's existing versions."}
-				props["epic"] = &jsonschema.Schema{Type: typeString,
-					Description: "Epic issue key to link this issue to. Company-managed projects only; team-managed projects use parent."}
-				props["parent"] = &jsonschema.Schema{Type: typeString,
-					Description: "Parent issue key."}
 			}
-			// Overwrites that are hard to recover.
+			// Overwrites that are hard to recover. assignee, epic and parent
+			// are SETs too: each replaces the previous value, and nothing here
+			// records what that value was.
 			if c.Destructive {
+				props["assignee"] = &jsonschema.Schema{Type: typeString,
+					Description: "Assignee email address, or an exact display name. Replaces the current assignee."}
+				props["epic"] = &jsonschema.Schema{Type: typeString,
+					Description: "Epic issue key to link this issue to, replacing any current epic link. Company-managed projects only; team-managed projects use parent."}
+				props["parent"] = &jsonschema.Schema{Type: typeString,
+					Description: "Parent issue key. Replaces the current parent."}
 				props["summary"] = &jsonschema.Schema{Type: typeString,
 					Description: "Replaces the summary."}
 				props["description"] = &jsonschema.Schema{Type: typeString,
@@ -93,11 +97,11 @@ func (m module) handleUpdate(ctx context.Context, raw json.RawMessage) (any, err
 	// validates against it, but the handler is where the write actually
 	// happens, so it re-checks rather than trusting its caller.
 	caps := m.cfg.Domains[Domain]
-	if !caps.Write && (in.Assignee != "" || in.FixVersion != "" || in.Epic != "" || in.Parent != "") {
-		return nil, fmt.Errorf("jira_update: assignee, fixVersion, epic and parent require the write capability for %s", Domain)
+	if !caps.Write && in.FixVersion != "" {
+		return nil, fmt.Errorf("jira_update: fixVersion requires the write capability for %s", Domain)
 	}
-	if !caps.Destructive && (in.Summary != "" || in.Description != "") {
-		return nil, fmt.Errorf("jira_update: summary and description require the destructive capability for %s", Domain)
+	if !caps.Destructive && (in.Assignee != "" || in.Epic != "" || in.Parent != "" || in.Summary != "" || in.Description != "") {
+		return nil, fmt.Errorf("jira_update: assignee, epic, parent, summary and description replace existing values and require the destructive capability for %s", Domain)
 	}
 
 	// Jira's own summary limit is 255 characters, not bytes, so an accented or
@@ -141,7 +145,7 @@ func (m module) handleUpdate(ctx context.Context, raw json.RawMessage) (any, err
 			return nil, fmt.Errorf("jira_update: %w", err)
 		}
 		if !m.cfg.AllowProject(current) {
-			return nil, fmt.Errorf("jira_update: issue %s now lives in project %s, which is not permitted by ATLAS_WRITE_PROJECTS", key, current)
+			return nil, fmt.Errorf("jira_update: issue %s now lives in project %q, which is not permitted by ATLAS_WRITE_PROJECTS", key, current)
 		}
 		// Versions are looked up in the project that actually holds the issue.
 		project = current
@@ -178,6 +182,9 @@ func (m module) handleUpdate(ctx context.Context, raw json.RawMessage) (any, err
 		if err != nil {
 			return nil, fmt.Errorf("jira_update: epic: %w", err)
 		}
+		if err := m.authorizeLinkTarget(ctx, logicalEpic, epic); err != nil {
+			return nil, fmt.Errorf("jira_update: %w", err)
+		}
 		// Classic projects use an Epic Link custom field whose id is
 		// site-specific; team-managed projects use parent. The id comes from
 		// configuration so it is never a shared hardcoded constant. A
@@ -190,6 +197,9 @@ func (m module) handleUpdate(ctx context.Context, raw json.RawMessage) (any, err
 		parent, err := validKey(in.Parent)
 		if err != nil {
 			return nil, fmt.Errorf("jira_update: parent: %w", err)
+		}
+		if err := m.authorizeLinkTarget(ctx, "parent", parent); err != nil {
+			return nil, fmt.Errorf("jira_update: %w", err)
 		}
 		fields["parent"] = map[string]any{fieldKey: parent}
 		applied = append(applied, "parent")
@@ -247,6 +257,33 @@ func (m module) currentProjectOf(ctx context.Context, key string) (string, error
 		return "", fmt.Errorf("issue %s returned no project, so the write allowlist cannot be checked", key)
 	}
 	return res.Fields.Project.Key, nil
+}
+
+// authorizeLinkTarget holds an epic or parent key to the same allowlist as the
+// issue being updated. Linking is not a write to one issue only: the target
+// gains a child in its hierarchy, on its board and in its roll-ups, so an
+// allowlist that names SANDBOX must not let an update there reach into PROD by
+// way of a parent key. The key's prefix is checked first, then — as for the
+// target issue — where the issue actually lives, because a moved issue keeps
+// every past key. Both checks are skipped when no allowlist exists at all,
+// since AllowProject accepts everything then and the round trip would buy
+// nothing.
+func (m module) authorizeLinkTarget(ctx context.Context, field, key string) error {
+	if !m.cfg.RestrictsProjects() {
+		return nil
+	}
+	project := projectOf(key)
+	if !m.cfg.AllowProject(project) {
+		return fmt.Errorf("%s %q is in project %s, which is not permitted by ATLAS_WRITE_PROJECTS", field, key, project)
+	}
+	current, err := m.currentProjectOf(ctx, key)
+	if err != nil {
+		return fmt.Errorf("%s %q: %w", field, key, err)
+	}
+	if !m.cfg.AllowProject(current) {
+		return fmt.Errorf("%s %q now lives in project %q, which is not permitted by ATLAS_WRITE_PROJECTS", field, key, current)
+	}
+	return nil
 }
 
 // boundedField refuses a free-form string longer than the limit, naming the
