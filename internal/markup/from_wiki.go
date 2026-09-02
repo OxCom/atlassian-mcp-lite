@@ -107,7 +107,30 @@ func splitCells(s, sep string) []string {
 func FromWiki(wiki string) string {
 	lines := strings.Split(wiki, "\n")
 	out := make([]string, 0, len(lines))
-	inCode, inQuote := false, false
+	inQuote := false
+
+	// A code body is buffered rather than emitted line by line, because the
+	// fence has to be longer than the longest backtick run inside the body and
+	// that is not known until the closing macro arrives. A fixed "```" let a
+	// body containing one close the block early, after which the rest of the
+	// field was read as live markdown — a planted "[x](javascript:...)" became
+	// a real link without ever passing safeLinkTarget, which the code path
+	// skips. The HTML reader already sizes its <pre> fence this way.
+	var (
+		inCode   bool
+		codeLang string
+		codeBody []string
+	)
+	flushCode := func() {
+		fence := strings.Repeat("`", maxBacktickRun(strings.Join(codeBody, "\n"))+1)
+		if len(fence) < 3 {
+			fence = "```"
+		}
+		out = append(out, fence+codeLang)
+		out = append(out, codeBody...)
+		out = append(out, fence)
+		inCode, codeLang, codeBody = false, "", nil
+	}
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -119,9 +142,9 @@ func FromWiki(wiki string) string {
 		// document into a fence.
 		if m := reWikiFence.FindStringSubmatch(trimmed); m != nil {
 			if inCode {
-				out, inCode = append(out, "```"), false
+				flushCode()
 			} else {
-				out, inCode = append(out, "```"+fenceLanguage(m[2])), true
+				inCode, codeLang, codeBody = true, fenceLanguage(m[2]), nil
 			}
 			continue
 		}
@@ -129,7 +152,7 @@ func FromWiki(wiki string) string {
 			// Code bodies are literal, with one exception: ToWiki breaks a
 			// "{code}" inside the body so it cannot close the macro early, and
 			// that break is ours to undo.
-			out = append(out, strings.ReplaceAll(strings.ReplaceAll(line, `{code\}`, "{code}"), `{code\:`, "{code:"))
+			codeBody = append(codeBody, strings.ReplaceAll(strings.ReplaceAll(line, `{code\}`, "{code}"), `{code\:`, "{code:"))
 			continue
 		}
 
@@ -183,7 +206,9 @@ func FromWiki(wiki string) string {
 		out = append(out, rendered...)
 	}
 	if inCode {
-		out = append(out, "```")
+		// An unterminated {code} still gets a closing fence, so the block does
+		// not run to the end of whatever the caller concatenates next.
+		flushCode()
 	}
 	return strings.Join(out, "\n")
 }
@@ -196,6 +221,14 @@ func fenceLanguage(params string) string {
 	first, _, _ = strings.Cut(first, ",")
 	first = strings.TrimSpace(first)
 	if first == "" || strings.Contains(first, "=") {
+		return ""
+	}
+	// The info string is copied onto the fence line, so it has to be shaped
+	// like a language and nothing else. A parameter of "```" would otherwise
+	// produce a six-backtick opener that the three-backtick closer never
+	// matches, swallowing the rest of the document into a code block.
+	// codeLangRe is the same shape ToWiki accepts in the other direction.
+	if !codeLangRe.MatchString(first) {
 		return ""
 	}
 	return first

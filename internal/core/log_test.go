@@ -11,14 +11,20 @@ import (
 	"unicode/utf8"
 )
 
-func TestMaskKeepsEndsHidesMiddle(t *testing.T) {
+func TestMaskKeepsHeadHidesRest(t *testing.T) {
 	const secret = "TOKENsecretmiddlepart0123"
 	got := Mask(secret)
 	if strings.Contains(got, "secretmiddlepart") {
 		t.Fatalf("Mask leaked the middle: %q", got)
 	}
-	if !strings.HasPrefix(got, "TOKE") || !strings.HasSuffix(got, "0123") {
-		t.Errorf("Mask(%q) = %q, want the first and last 4 characters preserved", secret, got)
+	if !strings.HasPrefix(got, "TOKE") {
+		t.Errorf("Mask(%q) = %q, want the first 4 characters preserved", secret, got)
+	}
+	// The tail is where the secret lives. In the value this most often masks,
+	// base64("email:token"), the last four characters decode to three bytes of
+	// the token itself.
+	if strings.HasSuffix(got, "0123") {
+		t.Errorf("Mask(%q) = %q, want the trailing characters hidden", secret, got)
 	}
 	if len(got) != len(secret) {
 		t.Errorf("Mask changed the length: %d, want %d", len(got), len(secret))
@@ -289,15 +295,15 @@ func TestMaskHandlesMultiByteRunes(t *testing.T) {
 }
 
 // The threshold governs how much must be hidden before anything is revealed.
-func TestMaskRevealsEndsOnlyWhenEnoughIsHidden(t *testing.T) {
+func TestMaskRevealsHeadOnlyWhenEnoughIsHidden(t *testing.T) {
 	for _, n := range []int{8, 9, 12, 15} {
 		in := strings.Repeat("a", n)
 		if got := Mask(in); strings.Contains(got, "a") {
 			t.Errorf("Mask of a %d-character value revealed characters: %q", n, got)
 		}
 	}
-	if got := Mask(strings.Repeat("a", 16)); !strings.HasPrefix(got, "aaaa") {
-		t.Errorf("Mask of a 16-character value = %q, want its ends revealed", got)
+	if got := Mask(strings.Repeat("a", 16)); !strings.HasPrefix(got, "aaaa") || strings.HasSuffix(got, "aaaa") {
+		t.Errorf("Mask of a 16-character value = %q, want its head revealed and its tail hidden", got)
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	// maskKeep is how many characters survive at each end of a masked value.
+	// maskKeep is how many leading characters survive in a masked value.
 	// Enough to recognise which credential is in play, never enough to use it.
 	maskKeep = 4
 
@@ -61,14 +61,21 @@ func Mask(s string) string {
 	// non-ASCII value as long enough to reveal its ends.
 	r := []rune(s)
 
-	// Revealing the ends is only safe when far more is hidden than shown.
+	// Revealing any of it is only safe when far more is hidden than shown.
 	// At the old threshold of maskKeep*2 a nine-character secret gave away
 	// eight of its nine characters.
 	if len(r) < maskKeep*revealRatio {
 		return strings.Repeat(maskRune, len(r))
 	}
 
-	masked := string(r[:maskKeep]) + strings.Repeat(maskRune, len(r)-maskKeep*2) + string(r[len(r)-maskKeep:])
+	// Only the leading characters are revealed. The value this most often
+	// masks is base64("email:token"), where the trailing characters decode to
+	// the last bytes of the token itself — four base64 characters are three
+	// bytes of it — while the leading ones decode to the start of the email
+	// address, which is not a secret. Keeping the head alone leaves an
+	// operator enough to tell one credential from another and gives away no
+	// part of the token.
+	masked := string(r[:maskKeep]) + strings.Repeat(maskRune, len(r)-maskKeep)
 	if masked == s {
 		// The value already has the shape of its own mask, so masking it
 		// changed nothing and it would be logged verbatim. Hide it entirely.

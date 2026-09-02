@@ -244,9 +244,18 @@ jobs:
         with:
           persist-credentials: false
       - name: build and push to ghcr.io
+        # The token and the actor reach the script as environment variables,
+        # never as ${{ }} interpolation. Interpolation pastes the value into
+        # the script text before the shell sees it, so a value containing
+        # shell syntax would be executed rather than read; an env var is data
+        # whatever it contains. Neither value is attacker-controlled today,
+        # which is why this is hardening rather than a fix.
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | \
-            docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          printf '%s' "$GHCR_TOKEN" | \
+            docker login ghcr.io -u "$GHCR_USER" --password-stdin
           # Lowercased: a Docker repository component must be, and the owner
           # here is "OxCom". github.repository preserves that capitalisation,
           # so the reference would be rejected before anything is pushed.

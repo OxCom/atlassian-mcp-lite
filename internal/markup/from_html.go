@@ -153,9 +153,15 @@ func render(b *strings.Builder, n *html.Node, listDepth int) {
 			renderChildren(b, n, listDepth)
 			return
 		}
-		b.WriteString("`")
-		renderChildren(b, n, listDepth)
-		b.WriteString("`")
+		// A single fixed backtick let content such as "a`b`c" close the span
+		// early and turned the middle into live markdown, so a "javascript:"
+		// link planted inside <code> reached the model without ever passing
+		// safeLinkTarget. wikiCodeSpan sizes the fence to the content and pads
+		// it when the content itself starts or ends with a backtick; the wiki
+		// reader has used it for its own code spans all along.
+		var inner strings.Builder
+		renderChildren(&inner, n, listDepth)
+		b.WriteString(wikiCodeSpan(inner.String(), false))
 		return
 	case "pre":
 		var inner strings.Builder
@@ -367,6 +373,13 @@ func inLiteral(n *html.Node) bool {
 // Line-leading "#", "-" and ">" are not escaped here — this runs per text node,
 // which does not know where a line begins — and their worst case is a heading
 // or bullet where prose was meant, not a forged link or code block.
+//
+// "<" is escaped because markdown carries inline HTML through. html.Parse
+// decodes "&lt;a href=&quot;javascript:...&quot;&gt;" back into real angle
+// brackets, so without this a page whose prose spells out an anchor hands a
+// rendering client the very link safeLinkTarget exists to refuse. ">" needs no
+// escape once "<" has one: a lone ">" cannot open a tag, and line-leading ">"
+// is the blockquote case above.
 var markdownEscaper = strings.NewReplacer(
 	`\`, `\\`,
 	"*", `\*`,
@@ -375,6 +388,7 @@ var markdownEscaper = strings.NewReplacer(
 	"[", `\[`,
 	"]", `\]`,
 	"|", `\|`,
+	"<", `\<`,
 )
 
 func escapeMarkdown(s string) string { return markdownEscaper.Replace(s) }
@@ -405,6 +419,13 @@ func maxBacktickRun(s string) int {
 
 // codeLanguage recovers the language of a Confluence code macro, which carries
 // it either as a syntaxhighlighter brush or as a language- class.
+//
+// The value is page content, and it is copied onto the fence line, so it must
+// be shaped like a language and nothing else: a "brush:```" would otherwise
+// lengthen the opening fence past its own closer and swallow the rest of the
+// page into a code block. codeLangRe is the same shape ToWiki accepts in the
+// other direction; anything else yields no language rather than a rejected
+// block.
 func codeLanguage(pre *html.Node) string {
 	nodes := []*html.Node{pre}
 	for c := pre.FirstChild; c != nil; c = c.NextSibling {
@@ -417,14 +438,14 @@ func codeLanguage(pre *html.Node) string {
 			for _, part := range strings.Split(params, ";") {
 				part = strings.TrimSpace(part)
 				if rest, ok := strings.CutPrefix(part, "brush:"); ok {
-					if lang := strings.TrimSpace(rest); lang != "" {
+					if lang := strings.TrimSpace(rest); codeLangRe.MatchString(lang) {
 						return lang
 					}
 				}
 			}
 		}
 		for _, class := range strings.Fields(attr(n, "class")) {
-			if lang, ok := strings.CutPrefix(class, "language-"); ok && lang != "" {
+			if lang, ok := strings.CutPrefix(class, "language-"); ok && codeLangRe.MatchString(lang) {
 				return lang
 			}
 		}

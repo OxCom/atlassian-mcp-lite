@@ -271,6 +271,8 @@ func (m module) flatten(key string, fields map[string]json.RawMessage) map[strin
 			if json.Unmarshal(raw, &s) == nil {
 				v, ok = markup.FromWiki(s), true
 			}
+		case "comment":
+			v, ok = commentValue(raw)
 		case "parent":
 			v, ok = parentValue(raw)
 		case fieldStatus, "issuetype", "priority", "resolution":
@@ -336,6 +338,41 @@ func scrubPassthrough(v any) any {
 		}
 	}
 	return v
+}
+
+// commentValue reduces Jira's comment container. A comment body is wiki markup
+// written by anyone who can comment on the issue — as untrusted as the
+// description — so it goes through FromWiki for the same reason: without the
+// conversion the body reached the model as raw wiki text whose links had never
+// been past safeLinkTarget, and a "javascript:" target planted in a comment
+// was copied through verbatim.
+//
+// An unexpected shape is passed through scrubbed rather than refused: the
+// container is still useful, and the caller's fallback would only repeat the
+// scrub.
+func commentValue(raw json.RawMessage) (any, bool) {
+	var g any
+	if json.Unmarshal(raw, &g) != nil {
+		return nil, false
+	}
+	container, isMap := scrubPassthrough(g).(map[string]any)
+	if !isMap {
+		return nil, false
+	}
+	list, isList := container["comments"].([]any)
+	if !isList {
+		return container, true
+	}
+	for _, item := range list {
+		c, isMap := item.(map[string]any)
+		if !isMap {
+			continue
+		}
+		if body, isText := c["body"].(string); isText {
+			c["body"] = markup.FromWiki(body)
+		}
+	}
+	return container, true
 }
 
 // unavailableFields lists the field names the caller asked for that Jira did

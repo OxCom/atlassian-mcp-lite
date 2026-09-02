@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -460,11 +461,21 @@ func TestTransportErrorIsNotAnAPIError(t *testing.T) {
 	if errors.As(err, &apiErr) {
 		t.Errorf("err = %v, want a transport error rather than *APIError", err)
 	}
-	// The wrap must preserve the chain, which is what lets callers reach
-	// context.Canceled and friends through it.
+	// *url.Error is deliberately stripped: its message carries the whole
+	// request URL, query string included, and that message reaches both the
+	// log and the model. The method and path are stated separately.
 	var urlErr *url.Error
-	if !errors.As(err, &urlErr) {
-		t.Errorf("err = %v, want the underlying *url.Error to remain reachable", err)
+	if errors.As(err, &urlErr) {
+		t.Errorf("err = %v, want the *url.Error stripped so the full URL is not echoed", err)
+	}
+	if strings.Contains(err.Error(), addr) {
+		t.Errorf("err = %v, want no request URL in the message", err)
+	}
+	// Stripping must not break the chain, which is what lets callers reach
+	// context.Canceled and the transport cause through it.
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		t.Errorf("err = %v, want the transport cause to remain reachable", err)
 	}
 }
 

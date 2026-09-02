@@ -335,11 +335,31 @@ targets stay on the Atlassian host" would not be true.
 
 **Text read from Atlassian is markdown-escaped.** Page and issue prose is
 third-party text, so the characters that would turn it into live markdown
-(`\`, `*`, `_`, backtick, `[`, `]`, `|`) are escaped on the way out, and a page
-containing `*not bold*` reaches the model as literal text rather than emphasis.
+(`\`, `*`, `_`, backtick, `[`, `]`, `|`, `<`) are escaped on the way out, and a
+page containing `*not bold*` reaches the model as literal text rather than
+emphasis. `<` is in that list because markdown carries inline HTML through: a
+page whose prose spells out `<a href="javascript:...">` would otherwise hand a
+rendering client the very link the scheme allowlist exists to refuse.
 One consequence you may notice: **round-tripping is no longer byte-identical**.
 Text carrying markdown-significant characters comes back escaped, so writing a
 body and reading it again returns the same meaning but not the same bytes.
+
+**Conversion and escaping cover long-form text fields, not identifiers.** The
+fields converted from wiki markup or HTML to markdown — and therefore the fields
+whose links pass the scheme allowlist and whose prose is markdown-escaped — are
+Jira's `description`, `environment` and comment bodies, and a Confluence page
+`body`. Everything else is returned as Atlassian sent it: issue and project
+keys, page and space ids, titles, status, version and component names, display
+names, and any custom field reached through `["*all"]`. Those are identifiers
+you feed back to the write tools, and escaping them would corrupt the value on
+the way back — a version named `1.0_beta` must not become `1.0\_beta`. They are
+still third-party strings inside `untrusted_content`, so the notice applies to
+them exactly as it does to a page body.
+
+**Error results carry their own notice.** An error message can quote text this
+server did not write — an Atlassian diagnostic, a rejected transition or version
+name, a space key — so it is prefixed with a sentence saying so. Credentials are
+replaced with a fixed marker in that text, never partially revealed.
 
 **Link and image destinations written to Atlassian are percent-encoded.** A
 destination lands unquoted in wiki markup, where `]` ends a link, `|` splits the

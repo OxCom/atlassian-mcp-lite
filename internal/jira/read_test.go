@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -381,6 +382,47 @@ func TestFlattenFieldShapes(t *testing.T) {
 				t.Errorf("%s = %v (%T), want %v", c.field, got, got, c.want)
 			}
 		})
+	}
+}
+
+// A comment body is wiki markup written by anyone who can comment on the
+// issue, so it is as untrusted as the description and is converted the same
+// way. Before it was, a comment reached the model as raw wiki text whose links
+// had never been checked, and a "javascript:" target planted in one was copied
+// through verbatim.
+func TestCommentBodiesAreConvertedAndLinksChecked(t *testing.T) {
+	const body = `See [click|javascript:alert(1)] and [docs|https://example.com/d].`
+	m := newTestModule(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"key":"PROJ-1","fields":{"comment":{"comments":[`+
+			`{"id":"1","body":`+strconv.Quote(body)+`,"author":{"displayName":"Ada L","emailAddress":"ada@example.com"}}`+
+			`],"total":1}}}`)
+	})
+
+	out := call(t, m, "jira_get", map[string]any{"key": "PROJ-1", "fields": []string{"+comment"}}).(map[string]any)
+	container, ok := out["comment"].(map[string]any)
+	if !ok {
+		t.Fatalf("comment = %v (%T), want an object", out["comment"], out["comment"])
+	}
+	list, ok := container["comments"].([]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("comments = %v, want one entry", container["comments"])
+	}
+	got, _ := list[0].(map[string]any)["body"].(string)
+
+	if strings.Contains(got, "javascript:") {
+		t.Errorf("comment body = %q, want the refused target dropped", got)
+	}
+	if !strings.Contains(got, "click") {
+		t.Errorf("comment body = %q, want the label of a refused link kept as text", got)
+	}
+	if !strings.Contains(got, "[docs](https://example.com/d)") {
+		t.Errorf("comment body = %q, want an allowed link converted to markdown", got)
+	}
+	// scrubPassthrough still runs underneath the conversion.
+	if author, _ := list[0].(map[string]any)["author"].(map[string]any); author != nil {
+		if _, leaked := author["emailAddress"]; leaked {
+			t.Errorf("comment author = %v, want the email address dropped", author)
+		}
 	}
 }
 

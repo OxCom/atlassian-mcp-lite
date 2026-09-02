@@ -534,7 +534,7 @@ func TestOversizedResultIsAnErrorNotATruncation(t *testing.T) {
 		t.Fatal("an envelope one byte over the cap must be an error result")
 	}
 	text := res.Content[0].(*mcp.TextContent).Text
-	want := fmt.Sprintf("result is %d bytes, above the %d-byte limit; narrow the request", maxResultBytes+1, maxResultBytes)
+	want := ErrorNotice + " " + fmt.Sprintf("result is %d bytes, above the %d-byte limit; narrow the request", maxResultBytes+1, maxResultBytes)
 	if text != want {
 		t.Errorf("error text = %q, want %q", text, want)
 	}

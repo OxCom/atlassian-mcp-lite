@@ -268,15 +268,25 @@ func validateBaseURL(raw string) error {
 	if strings.Contains(raw, "#") {
 		return errors.New("must be an origin only, with no fragment")
 	}
+	// Neither of the next two errors quotes raw, and the parse error is not
+	// wrapped. Go's *url.Error carries the whole URL in its message, so both
+	// would have printed an API token to stderr for the one input most likely
+	// to be malformed: a value with userinfo in it. A misconfigured URL is
+	// fixed by looking at the setting, not at an echo of it.
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("not a valid URL: %w", err)
+		return errors.New("is not a valid URL; expected an origin such as \"https://your-domain.atlassian.net\"")
+	}
+	// Checked before the host, and against the raw string rather than only the
+	// parsed userinfo: a value carrying two at-signs and a space parses to an
+	// empty host with u.User unset, so the host branch below would have
+	// reported it — and an origin-only URL has no other use for an at-sign
+	// anyway.
+	if u.User != nil || strings.Contains(raw, "@") {
+		return errors.New("must not contain credentials in the URL")
 	}
 	if u.Host == "" {
-		return fmt.Errorf("no host in %q", raw)
-	}
-	if u.User != nil {
-		return errors.New("must not contain credentials in the URL")
+		return errors.New("has no host; expected an origin such as https://your-domain.atlassian.net")
 	}
 	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return errors.New("must be an origin only, with no query or fragment")

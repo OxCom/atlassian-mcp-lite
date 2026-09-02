@@ -242,8 +242,16 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 	start := time.Now()
 	res, err := c.http.Do(req)
 	if err != nil {
-		// url.Error implements Unwrap, so wrapping with %w keeps the chain
-		// intact and errors.Is reaches context.Canceled or the timeout cause.
+		// *url.Error's message embeds the whole request URL, query string
+		// included — a CQL expression, or the email address in a user search.
+		// The method and path are already stated in every message built here,
+		// so the URL adds nothing but a leak into the log and, through
+		// toolError, into the model's context. Unwrapping to the transport
+		// cause keeps errors.Is reaching context.Canceled and the timeout.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		if cause := context.Cause(ctx); cause != nil && errors.Is(cause, ErrRequestTimeout) {
 			err = fmt.Errorf("%w after %s: %w", ErrRequestTimeout, elapsed(start), err)
 		}
