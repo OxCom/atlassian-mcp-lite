@@ -29,7 +29,8 @@ const maxEnvFileBytes = 64 * 1024
 // authority of its account, so a file another local user can read is a leaked
 // credential, and the safe reaction is to refuse to start and say how to fix
 // it. The check is skipped on Windows, whose ACLs are not expressed in Unix
-// mode bits.
+// mode bits, and on that platform LoadEnvFile returns a warning saying so
+// rather than passing the file silently — see envFileWarning.
 //
 // A symbolic link is refused before the file is opened. The link's owner
 // decides what it points at, and a 0600 target owned by that person passes
@@ -45,58 +46,64 @@ const maxEnvFileBytes = 64 * 1024
 // Syntax: one KEY=VALUE per line, blank lines and lines starting with "#"
 // ignored, an optional "export " prefix, and a value optionally wrapped in
 // single or double quotes. Nothing is interpolated.
-func LoadEnvFile(path string, lookup func(string) (string, bool)) (func(string) string, error) {
+//
+// The second result is an operator-facing warning, empty when every check ran.
+// It is returned rather than logged because nothing here holds a logger, and a
+// package-level one would give this function a hidden output that no caller can
+// redirect or silence. The caller — cmd/atlassian-mcp-lite — already has the
+// boot logger, so it does the writing.
+func LoadEnvFile(path string, lookup func(string) (string, bool)) (getenv func(string) string, warning string, err error) {
 	// Lstat, not Stat: Stat follows the link and would report the target as a
 	// perfectly ordinary regular file.
 	linkInfo, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", EnvFileVar, err)
+		return nil, "", fmt.Errorf("%s: %w", EnvFileVar, err)
 	}
 	if linkInfo.Mode()&fs.ModeSymlink != 0 {
-		return nil, fmt.Errorf("%s: %s is a symbolic link; point %s at the regular file itself", EnvFileVar, path, EnvFileVar)
+		return nil, "", fmt.Errorf("%s: %s is a symbolic link; point %s at the regular file itself", EnvFileVar, path, EnvFileVar)
 	}
 
 	f, err := os.Open(path) // #nosec G304 -- the operator names this path on purpose
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", EnvFileVar, err)
+		return nil, "", fmt.Errorf("%s: %w", EnvFileVar, err)
 	}
 	defer f.Close() //nolint:errcheck // read-only descriptor; nothing to flush
 
 	info, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", EnvFileVar, err)
+		return nil, "", fmt.Errorf("%s: %w", EnvFileVar, err)
 	}
 	// The descriptor must be the file Lstat looked at. If the path was
 	// replaced between the two calls — by a symlink, say — the symlink check
 	// above passed against a file that is not the one being read.
 	if !os.SameFile(linkInfo, info) {
-		return nil, fmt.Errorf("%s: %s changed between being checked and being opened", EnvFileVar, path)
+		return nil, "", fmt.Errorf("%s: %s changed between being checked and being opened", EnvFileVar, path)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s: %s is not a regular file", EnvFileVar, path)
+		return nil, "", fmt.Errorf("%s: %s is not a regular file", EnvFileVar, path)
 	}
 	if err := checkOwner(path, info); err != nil {
-		return nil, fmt.Errorf("%s: %w", EnvFileVar, err)
+		return nil, "", fmt.Errorf("%s: %w", EnvFileVar, err)
 	}
 	if info.Size() > maxEnvFileBytes {
-		return nil, fmt.Errorf("%s: %s is %d bytes; a configuration file must be under %d", EnvFileVar, path, info.Size(), maxEnvFileBytes)
+		return nil, "", fmt.Errorf("%s: %s is %d bytes; a configuration file must be under %d", EnvFileVar, path, info.Size(), maxEnvFileBytes)
 	}
 	if err := checkPrivate(path, info.Mode()); err != nil {
-		return nil, fmt.Errorf("%s: %w", EnvFileVar, err)
+		return nil, "", fmt.Errorf("%s: %w", EnvFileVar, err)
 	}
 
 	// Bounded by one byte more than the cap so a file that grew after Stat is
 	// detected rather than silently truncated.
 	raw, err := io.ReadAll(io.LimitReader(f, maxEnvFileBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", EnvFileVar, err)
+		return nil, "", fmt.Errorf("%s: %w", EnvFileVar, err)
 	}
 	if len(raw) > maxEnvFileBytes {
-		return nil, fmt.Errorf("%s: %s is larger than %d bytes", EnvFileVar, path, maxEnvFileBytes)
+		return nil, "", fmt.Errorf("%s: %s is larger than %d bytes", EnvFileVar, path, maxEnvFileBytes)
 	}
 	values, err := parseEnvFile(string(raw))
 	if err != nil {
-		return nil, fmt.Errorf("%s: %s: %w", EnvFileVar, path, err)
+		return nil, "", fmt.Errorf("%s: %s: %w", EnvFileVar, path, err)
 	}
 
 	return func(key string) string {
@@ -104,7 +111,31 @@ func LoadEnvFile(path string, lookup func(string) (string, bool)) (func(string) 
 			return v
 		}
 		return values[key]
-	}, nil
+	}, envFileWarning(runtime.GOOS, path), nil
+}
+
+// skipsModeChecks reports whether the platform expresses file access in a way
+// the owner and permission checks cannot read. Windows uses ACLs, and there is
+// no uid to compare against os.Geteuid, which returns -1 there. One predicate
+// for both the check and the warning, so the two cannot disagree about what
+// was skipped.
+func skipsModeChecks(goos string) bool {
+	return goos == "windows"
+}
+
+// envFileWarning is the notice for a platform where the owner and permission
+// checks did not run, and "" where they did. The checks were silent no-ops on
+// Windows, so a token file readable by every local account loaded with nothing
+// said about it — and windows/amd64 is a released build target. DACL
+// inspection is deliberately not attempted: getting it right needs the Windows
+// security APIs and a judgement about which SIDs are acceptable, and a check
+// that is subtly wrong is worse than a warning that is honest.
+func envFileWarning(goos, path string) string {
+	if !skipsModeChecks(goos) {
+		return ""
+	}
+	return fmt.Sprintf("%s: %s: the file owner and permission checks did not run, because Windows expresses access as an ACL rather than Unix mode bits; this file holds an API token, so restrict it to the account running the server yourself (for example: icacls %s /inheritance:r /grant:r %%USERNAME%%:R)",
+		EnvFileVar, path, path)
 }
 
 // checkOwnerUID is the owner rule with its inputs already extracted, so the
@@ -125,7 +156,9 @@ func checkOwnerUID(path string, fileUID, processUID int) error {
 // it, because the operator reads this once, in a client's log, and should not
 // have to look anything up.
 func checkPrivate(path string, mode fs.FileMode) error {
-	if runtime.GOOS == "windows" {
+	if skipsModeChecks(runtime.GOOS) {
+		// Skipped, not passed: LoadEnvFile's warning tells the operator that
+		// this check did not run.
 		return nil
 	}
 	perm := mode.Perm()

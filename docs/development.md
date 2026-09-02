@@ -67,6 +67,15 @@ discover the domain names, loads the env file if `ATLAS_ENV_FILE` is set,
 loads config, then re-registers functional modules wired to the config and
 client.
 
+`core.LoadEnvFile` returns three values — `(func(string) string, string, error)`
+— where the middle one is an operator-facing warning, empty when every check
+ran. It is returned rather than logged because `internal/core`'s env loader
+holds no logger, and `main` writes it with `bootLog.Error` so it is visible at
+the default log level. Today it is non-empty only on Windows, where both the
+file-permission and the file-owner check are skipped and the operator has to
+restrict the file themselves; a single predicate drives the skip and the
+warning, so the two cannot disagree about what did not run.
+
 ## Tests
 
 Tests use the standard library `testing` package only — no assertion library.

@@ -45,10 +45,21 @@ func run() error {
 	// so a container can override single values without editing it.
 	getenv := os.Getenv
 	if path := os.Getenv(core.EnvFileVar); path != "" {
-		var err error
-		if getenv, err = core.LoadEnvFile(path, os.LookupEnv); err != nil {
+		fromFile, warning, err := core.LoadEnvFile(path, os.LookupEnv)
+		if err != nil {
 			return fmt.Errorf("configuration: %w", err)
 		}
+		// On Windows the owner and permission checks cannot run, and the file
+		// holds an API token: the operator has to restrict it themselves, so
+		// the notice is logged at error level. The logger has two levels, and
+		// a warning nobody sees at the default one is not a warning. Logged
+		// with Error rather than Errorf: the message carries a filesystem path
+		// this process did not choose, and a stray % in it would corrupt the
+		// very notice it exists to deliver.
+		if warning != "" {
+			bootLog.Error(warning)
+		}
+		getenv = fromFile
 		bootLog.Debugf("configuration file %s loaded", path)
 	}
 

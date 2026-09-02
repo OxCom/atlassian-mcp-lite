@@ -311,18 +311,22 @@ func (m module) flatten(key string, fields map[string]json.RawMessage) map[strin
 // avatar URLs, a self link — wherever a person appears: comment authors,
 // worklog authors, watchers, custom user pickers, and whatever "*all" brings
 // back. Passing those fields through raw would make the passthrough the way
-// around the reducers. So every map that carries an accountId loses its
-// emailAddress, and every map loses avatarUrls and self, which are never useful
+// around the reducers. So every map loses its emailAddress, and every map
+// loses avatarUrls and self, which are never useful
 // to a model and point back at the site's own user and object endpoints. The
 // walk mutates in place; the value was decoded for this call alone.
+//
+// The address is removed from every map, not only from one that also carries an
+// accountId. Keying the removal on the id made the scrub depend on Jira's user
+// object keeping its present shape, and an email address is never something the
+// model needs from a field this code does not understand — so the shape is not
+// consulted at all.
 func scrubPassthrough(v any) any {
 	switch t := v.(type) {
 	case map[string]any:
 		delete(t, "avatarUrls")
 		delete(t, "self")
-		if _, isUser := t["accountId"]; isUser {
-			delete(t, "emailAddress")
-		}
+		delete(t, "emailAddress")
 		for k, child := range t {
 			t[k] = scrubPassthrough(child)
 		}

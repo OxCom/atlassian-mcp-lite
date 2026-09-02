@@ -41,7 +41,7 @@ func TestLoadEnvFileParsesAndProcessEnvWins(t *testing.T) {
 		"ATLAS_JIRA_DESTRUCTIVE=true",
 	}, "\n"), 0o600)
 
-	getenv, err := LoadEnvFile(path, lookupEnv(map[string]string{
+	getenv, _, err := LoadEnvFile(path, lookupEnv(map[string]string{
 		"ATLAS_EMAIL": "override@b.c",
 		// Set to empty in the process: must override the file's "true", not
 		// fall through to it.
@@ -73,7 +73,7 @@ func TestLoadEnvFileRefusesSharedPermissions(t *testing.T) {
 		0o600 | os.ModeSetuid, 0o600 | os.ModeSetgid, 0o600 | os.ModeSticky,
 	} {
 		path := writeEnvFile(t, "ATLAS_TOKEN=t\n", perm)
-		_, err := LoadEnvFile(path, lookupEnv(nil))
+		_, _, err := LoadEnvFile(path, lookupEnv(nil))
 		if err == nil {
 			t.Errorf("mode %o must be refused", perm)
 			continue
@@ -88,7 +88,7 @@ func TestLoadEnvFileRefusesSharedPermissions(t *testing.T) {
 	}
 	for _, perm := range []os.FileMode{0o600, 0o400} {
 		path := writeEnvFile(t, "ATLAS_TOKEN=t\n", perm)
-		if _, err := LoadEnvFile(path, lookupEnv(nil)); err != nil {
+		if _, _, err := LoadEnvFile(path, lookupEnv(nil)); err != nil {
 			t.Errorf("mode %04o must be accepted: %v", perm, err)
 		}
 	}
@@ -111,7 +111,7 @@ func TestPermissionErrorQuotesThePath(t *testing.T) {
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := LoadEnvFile(path, lookupEnv(nil))
+	_, _, err := LoadEnvFile(path, lookupEnv(nil))
 	if err == nil {
 		t.Fatal("0644 must be refused")
 	}
@@ -122,10 +122,10 @@ func TestPermissionErrorQuotesThePath(t *testing.T) {
 }
 
 func TestLoadEnvFileRejectsMissingAndMalformed(t *testing.T) {
-	if _, err := LoadEnvFile(filepath.Join(t.TempDir(), "absent"), lookupEnv(nil)); err == nil {
+	if _, _, err := LoadEnvFile(filepath.Join(t.TempDir(), "absent"), lookupEnv(nil)); err == nil {
 		t.Error("a missing file must be an error, not an empty configuration")
 	}
-	if _, err := LoadEnvFile(t.TempDir(), lookupEnv(nil)); err == nil {
+	if _, _, err := LoadEnvFile(t.TempDir(), lookupEnv(nil)); err == nil {
 		t.Error("a directory must be refused")
 	}
 	for _, body := range []string{
@@ -135,7 +135,7 @@ func TestLoadEnvFileRejectsMissingAndMalformed(t *testing.T) {
 		"ATLAS_TOKEN=a\x01b\n",
 	} {
 		path := writeEnvFile(t, body, 0o600)
-		if _, err := LoadEnvFile(path, lookupEnv(nil)); err == nil {
+		if _, _, err := LoadEnvFile(path, lookupEnv(nil)); err == nil {
 			t.Errorf("%q must be rejected", body)
 		}
 	}
@@ -143,7 +143,7 @@ func TestLoadEnvFileRejectsMissingAndMalformed(t *testing.T) {
 
 func TestLoadEnvFileBoundsSize(t *testing.T) {
 	path := writeEnvFile(t, "# "+strings.Repeat("x", maxEnvFileBytes)+"\n", 0o600)
-	if _, err := LoadEnvFile(path, lookupEnv(nil)); err == nil {
+	if _, _, err := LoadEnvFile(path, lookupEnv(nil)); err == nil {
 		t.Error("a file over the size cap must be refused")
 	}
 }
@@ -152,7 +152,7 @@ func TestLoadEnvFileBoundsSize(t *testing.T) {
 // server for every domain, through the same Load the binary uses.
 func TestLoadEnvFileFeedsLoad(t *testing.T) {
 	path := writeEnvFile(t, "ATLAS_BASE_URL=https://x.atlassian.net\nATLAS_EMAIL=a@b.c\nATLAS_TOKEN="+fixtureToken+"\n", 0o600)
-	getenv, err := LoadEnvFile(path, lookupEnv(nil))
+	getenv, _, err := LoadEnvFile(path, lookupEnv(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestLoadEnvFileRefusesSymlink(t *testing.T) {
 		t.Skipf("symlinks unavailable here: %v", err)
 	}
 
-	_, err := LoadEnvFile(link, lookupEnv(nil))
+	_, _, err := LoadEnvFile(link, lookupEnv(nil))
 	if err == nil {
 		t.Fatal("a symbolic link must be refused even when its target is private")
 	}
@@ -195,7 +195,7 @@ func TestLoadEnvFileRefusesSymlink(t *testing.T) {
 	}
 
 	// The control: the target itself is accepted.
-	if _, err := LoadEnvFile(target, lookupEnv(nil)); err != nil {
+	if _, _, err := LoadEnvFile(target, lookupEnv(nil)); err != nil {
 		t.Errorf("the regular file must be accepted: %v", err)
 	}
 }
@@ -209,7 +209,7 @@ func TestLoadEnvFileRejectsDuplicateKeys(t *testing.T) {
 		"ATLAS_EMAIL=a@b.c",
 		"export ATLAS_JIRA_WRITE=true",
 	}, "\n")+"\n", 0o600)
-	_, err := LoadEnvFile(path, lookupEnv(nil))
+	_, _, err := LoadEnvFile(path, lookupEnv(nil))
 	if err == nil {
 		t.Fatal("a duplicate key must be refused")
 	}
@@ -252,7 +252,7 @@ func TestCheckOwnerMatchesOnlyTheSameUID(t *testing.T) {
 // owned by this process, so it must load.
 func TestLoadEnvFileAcceptsOwnFile(t *testing.T) {
 	path := writeEnvFile(t, "ATLAS_TOKEN="+fixtureToken+"\n", 0o600)
-	if _, err := LoadEnvFile(path, lookupEnv(nil)); err != nil {
+	if _, _, err := LoadEnvFile(path, lookupEnv(nil)); err != nil {
 		t.Errorf("a private file owned by this process must load: %v", err)
 	}
 }
@@ -264,7 +264,7 @@ func TestLoadEnvFileAcceptsOwnFile(t *testing.T) {
 func TestLoadEnvFileRejectsLowercaseKeys(t *testing.T) {
 	for _, key := range []string{"atlas_token", "Atlas_Token", "ATLAS_jira_WRITE"} {
 		path := writeEnvFile(t, "ATLAS_URL=https://x.atlassian.net\n"+key+"=value\n", 0o600)
-		_, err := LoadEnvFile(path, lookupEnv(nil))
+		_, _, err := LoadEnvFile(path, lookupEnv(nil))
 		if err == nil {
 			t.Errorf("%q must be rejected: a key Load can never find is a silent misconfiguration", key)
 			continue
@@ -281,7 +281,7 @@ func TestLoadEnvFileRejectsLowercaseKeys(t *testing.T) {
 // case is exactly what the operator is told to write, so it has to be accepted.
 func TestLoadEnvFileAcceptsUppercaseKeys(t *testing.T) {
 	path := writeEnvFile(t, "ATLAS_TOKEN=value\nATLAS_JIRA_WRITE=true\n", 0o600)
-	getenv, err := LoadEnvFile(path, lookupEnv(nil))
+	getenv, _, err := LoadEnvFile(path, lookupEnv(nil))
 	if err != nil {
 		t.Fatalf("LoadEnvFile: %v", err)
 	}
@@ -290,5 +290,43 @@ func TestLoadEnvFileAcceptsUppercaseKeys(t *testing.T) {
 	}
 	if got := getenv("ATLAS_JIRA_WRITE"); got != "true" {
 		t.Errorf("ATLAS_JIRA_WRITE = %q, want %q", got, "true")
+	}
+}
+
+// On Windows neither the owner check nor the permission check can run: access
+// there is an ACL, not a set of Unix mode bits, and os.Geteuid returns -1. The
+// checks used to be silent no-ops, so a token file readable by every local
+// account loaded with nothing said about it. The decision is exercised as a
+// pure function, since the released windows/amd64 build cannot be run here.
+func TestEnvFileWarningNamesTheChecksThatDidNotRun(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		if w := envFileWarning(goos, "/srv/atlassian.env"); w != "" {
+			t.Errorf("%s: warning = %q, want none where both checks run", goos, w)
+		}
+	}
+
+	w := envFileWarning("windows", `C:\ProgramData\atlassian.env`)
+	if w == "" {
+		t.Fatal("Windows skips both checks, so it must say so")
+	}
+	for _, want := range []string{EnvFileVar, `C:\ProgramData\atlassian.env`, "owner", "permission", "Windows", "restrict"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warning = %q, want it to mention %q", w, want)
+		}
+	}
+}
+
+// The warning is a platform fact, so on a platform where both checks did run
+// the caller must be given nothing to log: an unconditional notice would train
+// the operator to ignore it.
+func TestLoadEnvFileWarnsOnlyWhereACheckIsSkipped(t *testing.T) {
+	path := writeEnvFile(t, "ATLAS_TOKEN="+fixtureToken+"\n", 0o600)
+	_, warning, err := LoadEnvFile(path, lookupEnv(nil))
+	if err != nil {
+		t.Fatalf("LoadEnvFile: %v", err)
+	}
+	want := envFileWarning(runtime.GOOS, path)
+	if warning != want {
+		t.Errorf("warning = %q, want %q for %s", warning, want, runtime.GOOS)
 	}
 }

@@ -375,10 +375,27 @@ func isASCIIPunct(c byte) bool {
 	return false
 }
 
-// escapeURL percent-encodes the two characters that would otherwise end a wiki
-// link or split its alias from its target. Percent-encoding keeps the URL
-// working, which backslash escaping inside a link target does not.
-var urlEscaper = strings.NewReplacer("|", "%7C", "]", "%5D")
+// escapeURL percent-encodes every character that would otherwise let a
+// destination escape the construct it sits in. A destination is author
+// content, and it lands unquoted in wiki markup: "]" ends a link, "|" splits
+// the alias from the target, "!" closes an image, and "{" opens a macro — so
+// "![a](x!{code}y)" would otherwise emit a live {code} macro. "[" is encoded
+// with its partner so a target cannot start a second construct either.
+//
+// Percent-encoding keeps the URL working, which backslash escaping inside a
+// link target does not: wiki markup has no escape for a destination, so a
+// backslash ships to Atlassian as a literal part of the URL.
+//
+// All three call sites — link, image and autolink — share this escaper, so a
+// character added here is covered on every path at once.
+var urlEscaper = strings.NewReplacer(
+	"|", "%7C",
+	"]", "%5D",
+	"[", "%5B",
+	"{", "%7B",
+	"}", "%7D",
+	"!", "%21",
+)
 
 func escapeURL(s string) string { return urlEscaper.Replace(s) }
 

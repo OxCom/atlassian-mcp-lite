@@ -34,6 +34,12 @@ const (
 	// rest only pads a log line and a tool result.
 	maxRawMessageBytes = 512
 
+	// maxContentTypeBytes caps the response Content-Type where it is echoed
+	// back in an error. A media type and its parameters are short; anything
+	// longer is padding from whatever answered the request, and it reaches
+	// both the log and the model.
+	maxContentTypeBytes = 128
+
 	// maxResponseBody caps a successful response. The whole body is buffered to
 	// decode it, so without a cap a runaway or hostile response is a memory
 	// exhaustion primitive.
@@ -378,7 +384,13 @@ func (c *Client) decode(res *http.Response, out any) (int, error) {
 		// points at the network — an intercepting proxy's HTML login page is
 		// the realistic cause.
 		if ct := res.Header.Get("Content-Type"); ct != "" && !isJSONContentType(ct) {
-			return len(raw), fmt.Errorf("expected JSON but the response is %s, so a proxy or login page may have intercepted the request: %w", ct, err)
+			// The type is chosen by whoever answered, so it is quoted and
+			// bounded exactly as upstreamMessage treats a body: a control
+			// character in a parameter would otherwise reach an operator's
+			// terminal, and a padded value would push the rest of the
+			// message out of the log line.
+			return len(raw), fmt.Errorf("expected JSON but the response is %s, so a proxy or login page may have intercepted the request: %w",
+				strconv.Quote(truncateBytes(ct, maxContentTypeBytes)), err)
 		}
 		return len(raw), fmt.Errorf("decode body: %w", err)
 	}
@@ -433,7 +445,7 @@ func upstreamMessage(raw []byte) string {
 			// Quoted per part rather than after the join, so the separator
 			// stays readable and one long part cannot swallow the others.
 			for i, p := range parts {
-				parts[i] = strconv.Quote(truncateRunes(p, maxRawMessageBytes))
+				parts[i] = strconv.Quote(truncateBytes(p, maxRawMessageBytes))
 			}
 			return strings.Join(parts, "; ")
 		}
@@ -443,15 +455,19 @@ func upstreamMessage(raw []byte) string {
 		// a log line or the model raw: a newline would let the body forge a
 		// second log entry, and the quoted form is still readable. Capped
 		// first, so the escaping has a bounded amount to work on.
-		return strconv.Quote(truncateRunes(s, maxRawMessageBytes))
+		return strconv.Quote(truncateBytes(s, maxRawMessageBytes))
 	}
 	return "(empty error body)"
 }
 
-// truncateRunes cuts s to at most limit bytes on a rune boundary and marks the
+// truncateBytes cuts s to at most limit bytes on a rune boundary and marks the
 // cut with an ellipsis. Cutting on a byte boundary would split a multi-byte
 // character, and strconv.Quote would then render the fragment as \x escapes.
-func truncateRunes(s string, limit int) string {
+//
+// Bytes, because every caller here bounds a payload — a response body or a
+// header value — where the wire size is the thing being limited. Use
+// TruncateRunes for a limit a product rule states in characters.
+func truncateBytes(s string, limit int) string {
 	if len(s) <= limit {
 		return s
 	}
@@ -460,6 +476,22 @@ func truncateRunes(s string, limit int) string {
 		cut--
 	}
 	return s[:cut] + "…"
+}
+
+// TruncateRunes cuts s to at most n characters, marking the cut with an
+// ellipsis. Characters rather than bytes, so a multi-byte character is never
+// split into a fragment that %q would then render as escapes.
+//
+// Exported for the domain modules, which bound third-party strings before
+// echoing them into an error message. One copy rather than one per package:
+// a truncation helper that bounds attacker-controlled text must not be able to
+// drift, because a drifted copy is an unbounded string somewhere.
+func TruncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // errorDetails reads both shapes Atlassian uses for the "errors" member: Jira's

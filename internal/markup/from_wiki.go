@@ -44,8 +44,12 @@ func wikiTableRow(line string, header bool) []string {
 	cells := make([]string, 0, len(raw))
 	for _, c := range raw {
 		// A pipe inside cell text has to stay escaped in the markdown output
-		// too, or it forges a column there instead.
-		cells = append(cells, strings.ReplaceAll(inlineFromWiki(strings.TrimSpace(c)), "|", `\|`))
+		// too, or it forges a column there instead. inlineFromWikiCell does
+		// that as part of escaping, which a blanket rewrite here could not: it
+		// would also hit the backslash-pipe pairs the escaper had just
+		// written, turning "\|" into "\\|" and putting the pipe back on the
+		// boundary.
+		cells = append(cells, inlineFromWikiCell(strings.TrimSpace(c)))
 	}
 	row := "| " + strings.Join(cells, " | ") + " |"
 	if !header {
@@ -207,7 +211,17 @@ func fenceLanguage(params string) string {
 // regexes over them would rewrite markup inside {{...}}, mangle URLs
 // containing * or _, and re-activate the very characters a backslash escape
 // was written to disable.
-func inlineFromWiki(s string) string {
+func inlineFromWiki(s string) string { return inlineFromWikiIn(s, false) }
+
+// inlineFromWikiCell is inlineFromWiki for text that will be placed in a
+// markdown table cell. There a pipe is a column boundary even inside a code
+// span or a link destination, neither of which the markdown escaper touches,
+// so those two get the escape as well.
+func inlineFromWikiCell(s string) string { return inlineFromWikiIn(s, true) }
+
+// inlineFromWikiIn is the shared implementation; cell selects table-cell
+// escaping.
+func inlineFromWikiIn(s string, cell bool) string {
 	// The placeholders are delimited by NUL, which is not text any Atlassian
 	// field should carry. Input that contains one anyway would be able to name
 	// a placeholder and have a held value substituted into it, so the byte is
@@ -223,30 +237,83 @@ func inlineFromWiki(s string) string {
 	// Escapes come first. ToWiki writes "\{" so a literal brace cannot open a
 	// macro; reading it back, the brace is plain text and must not be seen by
 	// any later pattern.
-	s = reWikiEscape.ReplaceAllStringFunc(s, func(m string) string { return hold(m[1:]) })
+	//
+	// The unescaped character is markdown-escaped as it is held: wiki "\[" is
+	// a literal bracket, and emitting a bare "[" would hand the model live
+	// markdown — enough, with a "]" and a parenthesis, to rebuild the very
+	// link the allowlist below exists to refuse.
+	s = reWikiEscape.ReplaceAllStringFunc(s, func(m string) string { return hold(escapeMarkdown(m[1:])) })
 
 	protect := func(re *regexp.Regexp, render func([]string) string) {
 		s = re.ReplaceAllStringFunc(s, func(m string) string {
 			return hold(render(re.FindStringSubmatch(m)))
 		})
 	}
-	protect(reWikiCode, func(g []string) string { return "`" + g[1] + "`" })
+	protect(reWikiCode, func(g []string) string { return wikiCodeSpan(g[1], cell) })
 	protect(reWikiLink, func(g []string) string {
 		// Same allowlist as the HTML reader: the target is issue text and goes
 		// to the model as a markdown link, so a "javascript:" or "data:"
 		// destination is dropped and only the label survives, escaped so it
 		// cannot turn into markup once it is no longer inside a link.
-		target, ok := safeLinkTarget(g[2])
+		// The target is restored before it is validated. An escape held
+		// earlier leaves a placeholder inside it, and safeLinkTarget strips
+		// NUL as a control character — so the allowlist would inspect
+		// "h0evil.example" while the link emitted placeholder debris, and a
+		// target written as "\\evil.example" would slip past the
+		// protocol-relative refusal because its backslashes were held.
+		target, ok := safeLinkTarget(restoreHeld(g[2], held))
 		if !ok {
 			return escapeMarkdown(g[1])
 		}
-		return "[" + g[1] + "](" + target + ")"
+		// The accepted target still needs the URL escaping the HTML reader
+		// applies, or a space or parenthesis ends the destination at a
+		// different place than the one the allowlist inspected.
+		target = escapeMarkdownURL(target)
+		if cell {
+			target = strings.ReplaceAll(target, "|", `\|`)
+		}
+		return "[" + escapeMarkdown(g[1]) + "](" + target + ")"
 	})
 
-	s = reWikiBold.ReplaceAllString(s, "**$1**")
-	s = reWikiItalic.ReplaceAllString(s, "*$1*")
+	// The emphasis results are held too, so the escaping below cannot disable
+	// the markers this function just wrote. Their content is plain text and is
+	// escaped on the way in.
+	protect(reWikiBold, func(g []string) string { return "**" + escapeMarkdown(g[1]) + "**" })
+	protect(reWikiItalic, func(g []string) string { return "*" + escapeMarkdown(g[1]) + "*" })
+
+	// Whatever is left is plain text: not wiki markup, not something this
+	// function produced. Page and issue text is untrusted, and it goes to the
+	// model as markdown, so it is escaped exactly as the HTML reader escapes a
+	// text node. Without this a plain markdown link written in a wiki field
+	// reaches the model live and never meets the allowlist above at all.
+	//
+	// This runs before restoreHeld, so held code spans and validated links
+	// keep their markup. The placeholder syntax survives it: a placeholder is
+	// a NUL, "h", digits and a NUL, and the escaper touches none of those.
+	s = escapeMarkdown(s)
 
 	return restoreHeld(s, held)
+}
+
+// wikiCodeSpan wraps code-span content in a backtick fence longer than the
+// longest run of backticks inside it. A fixed single backtick let content such
+// as "a`b`c" close the span early and turned the middle into live markdown —
+// the same failure the HTML reader already avoids for code blocks. CommonMark
+// also requires a space pad when the content itself begins or ends with a
+// backtick, or the fence and the content run together.
+//
+// cell adds the table-cell pipe escape: inside a markdown table a pipe is a
+// column boundary even within a code span, and "\|" is how GFM spells a
+// literal one there.
+func wikiCodeSpan(content string, cell bool) string {
+	if cell {
+		content = strings.ReplaceAll(content, "|", `\|`)
+	}
+	fence := strings.Repeat("`", maxBacktickRun(content)+1)
+	if strings.HasPrefix(content, "`") || strings.HasSuffix(content, "`") {
+		content = " " + content + " "
+	}
+	return fence + content + fence
 }
 
 // restoreHeld substitutes every placeholder in one pass. A held link or code

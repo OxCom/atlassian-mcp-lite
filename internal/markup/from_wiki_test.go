@@ -100,16 +100,29 @@ func TestRoundTripStability(t *testing.T) {
 // Text that ToWiki had to escape must come back as the author wrote it. If
 // FromWiki did not know about the escapes, the emphasis and link patterns
 // would match the very characters the backslash disabled.
+//
+// The round trip is over the *text*, not the bytes. FromWiki now escapes the
+// plain text it emits, because that text is untrusted and goes to the model as
+// markdown, so a literal "*" comes back as "\*" — the markdown spelling of the
+// same character, which renders identically. Characters markdown does not care
+// about, such as a brace, are unchanged.
 func TestRoundTripRestoresEscapedText(t *testing.T) {
-	for _, md := range []string{
-		"literal {code} and [x|y] and a|b",
-		"a * b _ c",
-		"snake_case_name and 2*3",
-		"braces {like this} stay text",
-		"```\nbody with {code} inside\n```",
+	for md, want := range map[string]string{
+		"literal {code} and [x|y] and a|b":  `literal {code} and \[x\|y\] and a\|b`,
+		"a * b _ c":                         `a \* b \_ c`,
+		"snake_case_name and 2*3":           `snake\_case\_name and 2\*3`,
+		"braces {like this} stay text":      "braces {like this} stay text",
+		"```\nbody with {code} inside\n```": "```\nbody with {code} inside\n```",
 	} {
-		if got := FromWiki(ToWiki(md)); got != md {
-			t.Errorf("round trip changed document:\n in:  %q\n out: %q\n wiki: %q", md, got, ToWiki(md))
+		got := FromWiki(ToWiki(md))
+		if got != want {
+			t.Errorf("round trip changed document:\n in:   %q\n out:  %q\n want: %q\n wiki: %q", md, got, want, ToWiki(md))
+		}
+		// The escaping is stable: converting the result back to wiki yields
+		// the same wiki markup, so a read-modify-write cycle does not
+		// accumulate backslashes.
+		if reWiki := ToWiki(got); reWiki != ToWiki(md) {
+			t.Errorf("escaping is not stable across a second pass:\n first:  %q\n second: %q", ToWiki(md), reWiki)
 		}
 	}
 }
@@ -120,8 +133,9 @@ func TestFromWikiConsumesEscapes(t *testing.T) {
 	if got, want := FromWiki(`a \{b\} c`), "a {b} c"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
-	// An escaped star is literal text, not the start of bold.
-	if got, want := FromWiki(`\*not bold\*`), "*not bold*"; got != want {
+	// An escaped star is literal text, not the start of bold — and it stays
+	// escaped on the markdown side, where a bare "*not bold*" would be bold.
+	if got, want := FromWiki(`\*not bold\*`), `\*not bold\*`; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
@@ -220,7 +234,10 @@ func TestFromWikiUnsafeLinkKeepsLabelDropsTarget(t *testing.T) {
 		}
 	}
 	for in, want := range map[string]string{
-		"[t|https://ok.example/a(b)]": "[t](https://ok.example/a(b))",
+		// The accepted target is URL-escaped, as in the HTML reader: an
+		// unescaped parenthesis ends the destination before the target the
+		// allowlist inspected.
+		"[t|https://ok.example/a(b)]": "[t](https://ok.example/a%28b%29)",
 		"[t|/wiki/spaces/X]":          "[t](/wiki/spaces/X)",
 		"[t|mailto:a@b.c]":            "[t](mailto:a@b.c)",
 		"[t|#top]":                    "[t](#top)",
@@ -229,5 +246,119 @@ func TestFromWikiUnsafeLinkKeepsLabelDropsTarget(t *testing.T) {
 		if got := FromWiki(in); got != want {
 			t.Errorf("FromWiki(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Item 2: issue and page text read back from Atlassian is untrusted, and
+// FromWiki hands it straight to the model as markdown. Without escaping the
+// text that is not wiki markup, an author can write a plain markdown link and
+// bypass the safeLinkTarget allowlist this same function applies to wiki
+// links.
+func TestFromWikiEscapesPlainText(t *testing.T) {
+	got := FromWiki("see [click](javascript:alert(1)) here")
+	if strings.Contains(got, "[click](") {
+		t.Errorf("markdown link survived as live markup: %q", got)
+	}
+	if want := `see \[click\](javascript:alert(1)) here`; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if !strings.Contains(got, "click") {
+		t.Errorf("text was dropped rather than escaped: %q", got)
+	}
+}
+
+// A pipe in prose must not forge a table column, a backtick must not open a
+// code span, and an asterisk that formed no wiki emphasis must not become one
+// in markdown.
+func TestFromWikiEscapesStructuralCharactersInProse(t *testing.T) {
+	for in, want := range map[string]string{
+		"x |a|b| y":      `x \|a\|b\| y`,
+		"a ` b":          "a \\` b",
+		"half *open":     `half \*open`,
+		"under_score":    `under\_score`,
+		`a \\ b`:         `a \\ b`,
+		"brackets [x] y": `brackets \[x\] y`,
+	} {
+		if got := FromWiki(in); got != want {
+			t.Errorf("FromWiki(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Escaping the residue must not disturb anything the placeholder scheme is
+// holding: a code span, an allowlisted link and both emphasis forms all keep
+// their markup.
+func TestFromWikiEscapingKeepsRealMarkup(t *testing.T) {
+	for in, want := range map[string]string{
+		"{{code}}":                   "`code`",
+		"[lbl|https://ok.example]":   "[lbl](https://ok.example)",
+		"*bold*":                     "**bold**",
+		"_italic_":                   "*italic*",
+		"a *b* and {{c}} and [d|/e]": "a **b** and `c` and [d](/e)",
+	} {
+		if got := FromWiki(in); got != want {
+			t.Errorf("FromWiki(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Item 4: a code span whose content holds backticks closed early, and the
+// middle of it became live markdown. The fence has to be longer than the
+// longest run inside it, as the HTML reader already does for a code block.
+func TestFromWikiCodeSpanFenceOutrunsItsContent(t *testing.T) {
+	for in, want := range map[string]string{
+		"{{a`b`c}}":  "``a`b`c``",
+		"{{a``b}}":   "```a``b```",
+		"{{a```b}}":  "````a```b````",
+		"{{`lead}}":  "`` `lead ``",
+		"{{trail`}}": "`` trail` ``",
+	} {
+		if got := FromWiki(in); got != want {
+			t.Errorf("FromWiki(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Item 5: the target that passed the allowlist is inserted into a markdown
+// link, so it needs the same URL escaping the HTML reader applies. A space or
+// a parenthesis otherwise ends the destination somewhere the allowlist never
+// looked.
+func TestFromWikiEscapesAcceptedLinkTarget(t *testing.T) {
+	if got, want := FromWiki("[lbl|http://a.com/ (x)]"), "[lbl](http://a.com/%20%28x%29)"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// A pipe inside a link target still has to be escaped when the text lands in a
+// markdown table cell, where a bare pipe forges a column. The markdown escaper
+// does not reach into a held link, so the cell variant adds it.
+func TestFromWikiTableCellEscapesPipesInHeldSpans(t *testing.T) {
+	if got, want := FromWiki("|[t|http://a.example/x|y]|b|"), `| [t](http://a.example/x\|y) | b |`; got != want {
+		t.Errorf("link target: got %q, want %q", got, want)
+	}
+}
+
+// A wiki escape inside a link target is held as a placeholder before the
+// target is validated. safeLinkTarget strips NUL as a control character, so an
+// unrestored target would be validated as "h0evil.example" and emitted with
+// the placeholder debris in it — and a protocol-relative target spelled with
+// backslashes would never be seen as one.
+func TestFromWikiLinkTargetIsRestoredBeforeValidation(t *testing.T) {
+	for _, in := range []string{
+		`[t|\\evil.example\x]`,
+		`[t|\/\/evil.example/x]`,
+	} {
+		got := FromWiki(in)
+		if strings.Contains(got, "](") {
+			t.Errorf("FromWiki(%q) = %q, want the target refused", in, got)
+		}
+		if strings.Contains(got, "h0") || strings.Contains(got, "\x00") {
+			t.Errorf("FromWiki(%q) = %q, placeholder debris leaked", in, got)
+		}
+	}
+	// A held escape in the target of an otherwise safe link is restored, not
+	// leaked as a placeholder.
+	if got, want := FromWiki(`[t|https://ok.example/a\-b]`), "[t](https://ok.example/a-b)"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

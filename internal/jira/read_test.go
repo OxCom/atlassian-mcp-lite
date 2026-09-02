@@ -639,3 +639,37 @@ func TestReadToolDescriptionsMarkResultsAsThirdPartyData(t *testing.T) {
 		}
 	}
 }
+
+// An email address is never something a model needs from a field this code does
+// not understand, so it goes regardless of what else the map carries. Requiring
+// an accountId alongside it made the scrub depend on Jira's user-object shape:
+// any variant that omits the id — a custom field, a plugin, a future response —
+// would have carried the address straight through.
+func TestScrubPassthroughRemovesEmailWithoutAnAccountID(t *testing.T) {
+	v := scrubPassthrough(map[string]any{
+		"displayName":  "Ada",
+		"emailAddress": "ada@example.com",
+		"nested": []any{map[string]any{
+			"emailAddress": "bob@example.com",
+			"self":         "https://x/user",
+			"avatarUrls":   map[string]any{"48x48": "https://x/a.png"},
+		}},
+	})
+	top, _ := v.(map[string]any)
+	if _, ok := top["emailAddress"]; ok {
+		t.Error("emailAddress survived a map that carries no accountId")
+	}
+	if top["displayName"] != "Ada" {
+		t.Errorf("displayName = %v, want the useful fields untouched", top["displayName"])
+	}
+	list, _ := top["nested"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("nested = %v", top["nested"])
+	}
+	child, _ := list[0].(map[string]any)
+	for _, gone := range []string{"emailAddress", "self", "avatarUrls"} {
+		if _, ok := child[gone]; ok {
+			t.Errorf("%s survived inside a nested list element", gone)
+		}
+	}
+}

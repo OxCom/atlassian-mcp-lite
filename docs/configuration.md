@@ -53,8 +53,19 @@ Two further rules apply on every platform:
   means the uid you pass to `--user` must own the mounted file, which is why
   the README's client entry uses your own `id -u` and `id -g`.
 
-Windows does not express permissions as Unix mode bits, so the mode check is
-skipped there. Keep the file inside your own profile directory.
+Windows does not express access as Unix mode bits, so **both** the mode check
+and the owner check are skipped there — an ACL has no uid to compare against.
+Neither is silent: the server logs a warning at startup naming both skipped
+checks and reminding you that the file holds an API token, so on Windows
+restricting it is your job rather than the server's:
+
+```text
+atlassian-mcp-lite: ATLAS_ENV_FILE: C:\Users\you\atlassian-mcp-lite.env: the file owner and permission checks did not run, because Windows expresses access as an ACL rather than Unix mode bits; this file holds an API token, so restrict it to the account running the server yourself (for example: icacls C:\Users\you\atlassian-mcp-lite.env /inheritance:r /grant:r %USERNAME%:R)
+```
+
+The warning is logged even at the default `info` level, and the startup
+continues. Keep the file inside your own profile directory and run the `icacls`
+command it suggests.
 
 ### Precedence
 
@@ -314,6 +325,30 @@ planted in a page never becomes something the model or your client can follow.
 Scheme-less targets — relative paths, `/wiki/...`, `#anchor` — stay links,
 because they stay on the Atlassian host. Whitespace and control characters are
 stripped before the scheme is read, so `java\tscript:` is caught too.
+
+That last exemption has one exception. A scheme-less target beginning with two
+slashes names another origin without naming a scheme, so `//evil.example/x` is
+**refused** rather than kept, and a backslash counts as a slash for the test —
+a UNC-style `\\host\share` and a mixed `/\host` reach the same
+protocol-relative destination and are refused with it. Without that, "scheme-less
+targets stay on the Atlassian host" would not be true.
+
+**Text read from Atlassian is markdown-escaped.** Page and issue prose is
+third-party text, so the characters that would turn it into live markdown
+(`\`, `*`, `_`, backtick, `[`, `]`, `|`) are escaped on the way out, and a page
+containing `*not bold*` reaches the model as literal text rather than emphasis.
+One consequence you may notice: **round-tripping is no longer byte-identical**.
+Text carrying markdown-significant characters comes back escaped, so writing a
+body and reading it again returns the same meaning but not the same bytes.
+
+**Link and image destinations written to Atlassian are percent-encoded.** A
+destination lands unquoted in wiki markup, where `]` ends a link, `|` splits the
+alias from the target, `!` closes an image and `{` opens a macro. All six of
+`|`, `]`, `[`, `{`, `}` and `!` are percent-encoded, so a markdown link whose
+target contains `!{code}` cannot emit a live macro in the page it is written to.
+Percent-encoding is used rather than backslash escaping because wiki markup has
+no escape inside a destination — a backslash would ship as a literal part of the
+URL.
 
 ## Validation
 

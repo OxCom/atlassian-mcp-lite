@@ -29,7 +29,22 @@ const (
 	maxTitleLen    = 255
 	maxSpaceKeyLen = 255
 	maxBodyLen     = 1 << 18 // 256 KiB
+
+	// maxSpaceKeyEcho bounds a space key where an error echoes it back. A real
+	// key is a handful of characters; the cap exists because the key in these
+	// messages came from Confluence rather than from this process, and it
+	// travels on into a tool result and a log line.
+	maxSpaceKeyEcho = 64
 )
+
+// quoteKey bounds and quotes a space key for an error message. Every such key
+// is third-party text — the caller's own, or one Confluence returned — and the
+// Jira package treats workflow names the same way: unquoted, a control byte in
+// it reaches an operator's terminal, and message-shaped punctuation lets the
+// key impersonate the sentence it sits in.
+func quoteKey(key string) string {
+	return fmt.Sprintf("%q", core.TruncateRunes(key, maxSpaceKeyEcho))
+}
 
 // bound rejects an over-long free-form string, naming the field and the limit.
 // bound rejects an over-long free-form string, naming the field and the limit.
@@ -109,7 +124,7 @@ func (m module) handleCreatePage(ctx context.Context, raw json.RawMessage) (any,
 	// core.AllowSpace does, so the two checks agree rather than one being
 	// laxer than the other.
 	if !m.cfg.AllowSpace(space) {
-		return nil, fmt.Errorf("confluence_create_page: writes to space %s are not permitted by ATLAS_WRITE_SPACES", space)
+		return nil, fmt.Errorf("confluence_create_page: writes to space %s are not permitted by ATLAS_WRITE_SPACES", quoteKey(space))
 	}
 
 	body := map[string]any{
@@ -136,7 +151,7 @@ func (m module) handleCreatePage(ctx context.Context, raw json.RawMessage) (any,
 			if !strings.EqualFold(strings.TrimSpace(parentSpace), space) {
 				return nil, fmt.Errorf(
 					"confluence_create_page: parent page %s is in space %s, not the requested space %s; a child page is created in its parent's space, so refusing",
-					pid, parentSpace, space)
+					pid, quoteKey(parentSpace), quoteKey(space))
 			}
 		}
 		body["parentId"] = pid
@@ -270,7 +285,7 @@ func (m module) handleUpdatePage(ctx context.Context, raw json.RawMessage) (any,
 			return nil, fmt.Errorf("confluence_update_page: %w", err)
 		}
 		if !m.cfg.AllowSpace(key) {
-			return nil, fmt.Errorf("confluence_update_page: writes to space %s are not permitted by ATLAS_WRITE_SPACES", key)
+			return nil, fmt.Errorf("confluence_update_page: writes to space %s are not permitted by ATLAS_WRITE_SPACES", quoteKey(key))
 		}
 	}
 
@@ -358,7 +373,7 @@ func (m module) handleComment(ctx context.Context, raw json.RawMessage) (any, er
 			return nil, fmt.Errorf("confluence_comment: %w", err)
 		}
 		if !m.cfg.AllowSpace(key) {
-			return nil, fmt.Errorf("confluence_comment: writes to space %s are not permitted by ATLAS_WRITE_SPACES", key)
+			return nil, fmt.Errorf("confluence_comment: writes to space %s are not permitted by ATLAS_WRITE_SPACES", quoteKey(key))
 		}
 	}
 

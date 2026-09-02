@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/OxCom/atlassian-mcp-lite/internal/core"
 )
 
 // maxNameLen bounds the free-form names a caller supplies for lookup — an
@@ -120,20 +122,9 @@ func (m module) candidateSuffix(items []string) string {
 func quoteNames(names []string) []string {
 	out := make([]string, 0, len(names))
 	for _, n := range names {
-		out = append(out, fmt.Sprintf("%q", truncateRunes(n, maxCandidateRunes)))
+		out = append(out, fmt.Sprintf("%q", core.TruncateRunes(n, maxCandidateRunes)))
 	}
 	return out
-}
-
-// truncateRunes cuts s to at most n characters, marking the cut with an
-// ellipsis. Characters rather than bytes, so a multi-byte name is not split
-// inside a rune.
-func truncateRunes(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
 }
 
 // versionIDFor resolves a version name to its id within a project.

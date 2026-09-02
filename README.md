@@ -142,7 +142,10 @@ The three classes mean:
 
 Tools speak markdown. Atlassian does not accept markdown over REST, so the
 server converts markdown to wiki markup on the way in, and wiki markup or
-rendered HTML back to markdown on the way out.
+rendered HTML back to markdown on the way out. Text coming out is
+markdown-escaped, because page prose is third-party input and must not reach the
+model as live markdown; the practical consequence is that a round trip preserves
+meaning but not bytes when the text contains markdown-significant characters.
 
 There is no paging. `limit` is clamped to `ATLAS_LIMIT_MAX` and a truncated
 result says so, using each API's own completion signal.
@@ -208,6 +211,12 @@ the user the server runs as. Setting the same key twice in it is an error
 rather than last-one-wins. Process environment overrides the file, value by
 value.
 
+On **Windows** neither the permission check nor the owner check can run, because
+access there is an ACL rather than Unix mode bits. The server says so instead of
+staying quiet: it logs a warning at startup naming both skipped checks and
+suggesting the `icacls` command that restricts the file to the account running
+the server. Restricting it is yours to do on that platform.
+
 The short version:
 
 | Variable | Default | Meaning |
@@ -257,6 +266,10 @@ key — are in [`docs/configuration.md`](docs/configuration.md).
   converted content are limited to `http`, `https` and `mailto`; a target with
   any other scheme is rendered as plain text, so a `javascript:` or `data:` URL
   planted in a page never becomes a link the model or your client can follow.
+  Scheme-less targets stay links because they resolve against the Atlassian
+  host, with one exception: a target starting with two slashes or backslashes
+  (`//evil.example/x`, `\\host\share`) names another origin without naming a
+  scheme, and is refused.
 - **A result above 1 MiB is refused, not truncated.** The limit is measured on
   the wrapped result, and the error asks for a narrower request. A cut JSON
   document is worse than none, because the model cannot tell where the cut

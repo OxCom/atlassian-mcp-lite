@@ -28,6 +28,11 @@ and follow docs/install.md exactly.
   mode is not exactly `0600` (or `0400`). It also refuses a symbolic link and a
   file owned by anyone but the user the server runs as, so write the real file
   in the user's own home directory rather than linking to one elsewhere.
+- **On Windows, tell the user to restrict the file themselves.** Neither the
+  permission check nor the owner check runs there — access is an ACL, not Unix
+  mode bits — so the server logs a warning at startup naming both skipped checks
+  and suggesting an `icacls` command. Relay that command rather than treating a
+  clean startup as proof the file is private.
 - **Do not run the server against the real site to "test" it** until the user
   has filled in the token. A startup check with placeholders is fine and is
   expected to fail with a clear configuration error.

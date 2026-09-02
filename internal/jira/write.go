@@ -181,7 +181,7 @@ func (m module) handleTransition(ctx context.Context, raw json.RawMessage) (any,
 		// Names are quoted and bounded before they reach an error: they are
 		// workflow data chosen by someone else, not part of the message.
 		available = append(available, fmt.Sprintf("%q -> %q (id %s)",
-			truncateRunes(tr.Name, maxCandidateRunes), truncateRunes(tr.To.Name, maxCandidateRunes), tr.ID))
+			core.TruncateRunes(tr.Name, maxCandidateRunes), core.TruncateRunes(tr.To.Name, maxCandidateRunes), tr.ID))
 		if tr.ID == want || strings.EqualFold(tr.Name, want) || strings.EqualFold(tr.To.Name, want) {
 			matched[i] = true
 		}

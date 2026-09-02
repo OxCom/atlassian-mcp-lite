@@ -993,3 +993,43 @@ func TestJSONErrorMessagesAreCappedAndQuoted(t *testing.T) {
 		t.Error("an unbounded message survived the cap")
 	}
 }
+
+// The Content-Type is chosen by whatever answered the request — the real
+// endpoint, a hostile one, or an intercepting proxy — so on this error path it
+// is third-party text and must be quoted and bounded like every other such
+// string. What can actually arrive is narrower than it looks: Go's transport
+// refuses a header line carrying a control byte, and an unparseable media type
+// never reaches this branch because isJSONContentType lets the decoder produce
+// the error instead. A parseable type with a hostile quoted parameter passes
+// both gates, and that is what this sends: a tab and message-shaped
+// punctuation, followed by 2 KiB of filler that would otherwise push the rest
+// of the message out of the log line and out of the tool result.
+func TestNonJSONContentTypeIsQuotedAndBounded(t *testing.T) {
+	hostile := "text/html; x=\"\tERROR forged entry " + strings.Repeat("A", 2048) + "\""
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", hostile)
+		_, _ = io.WriteString(w, "<html><body>Sign in</body></html>")
+	})
+
+	var out struct{ K string }
+	err := c.Do(context.Background(), http.MethodGet, "/x", nil, nil, &out)
+	if err == nil {
+		t.Fatal("HTML in place of JSON must be an error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `"text/html`) {
+		t.Errorf("error = %q, want the content type quoted", msg)
+	}
+	if strings.Contains(msg, "\t") {
+		t.Errorf("error carries a raw tab: %q", msg)
+	}
+	if !strings.Contains(msg, `\t`) {
+		t.Errorf("error = %q, want the tab rendered as an escape", msg)
+	}
+	if len(msg) > 512 {
+		t.Errorf("error is %d bytes long; the content type must be bounded: %q", len(msg), msg)
+	}
+	if !strings.Contains(msg, "…") {
+		t.Errorf("error = %q, want the truncation marked", msg)
+	}
+}

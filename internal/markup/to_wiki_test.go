@@ -354,3 +354,38 @@ func TestToWikiFenceLanguageIsValidated(t *testing.T) {
 		}
 	}
 }
+
+// Item 1: a link, image or autolink destination is author-controlled text that
+// lands unquoted in wiki markup. "!" closes an image and "{" opens a macro, so
+// a destination that carries either must not reach the renderer live.
+func TestToWikiEscapesWikiSyntaxInDestinations(t *testing.T) {
+	for _, c := range []struct{ name, in, want string }{
+		{"image destination cannot close the image", "![a](x!{code}y)", "!x%21%7Bcode%7Dy|alt=a!"},
+		{"link destination cannot open a macro", "[lbl](h{quote}t)", "[lbl|h%7Bquote%7Dt]"},
+		{"autolink cannot open a macro", "<https://e.com/a{code}b>", "[https://e.com/a%7Bcode%7Db]"},
+		{"bracket in destination is encoded", "[lbl](h[x]t)", "[lbl|h%5Bx%5Dt]"},
+	} {
+		got := ToWiki(c.in)
+		if got != c.want {
+			t.Errorf("%s: ToWiki(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+		// Whatever the destination held, the only "{" or "}" left in the
+		// output would have to be one this converter wrote, and it writes
+		// neither for a link, an image or an autolink.
+		if strings.ContainsAny(got, "{}") {
+			t.Errorf("%s: %q still carries a live brace", c.name, got)
+		}
+	}
+}
+
+// Escaping a destination must not damage an ordinary URL: none of the
+// characters a query string or fragment needs is wiki-significant.
+func TestToWikiOrdinaryDestinationSurvivesEscaping(t *testing.T) {
+	if got, want := ToWiki("[t](https://e.com/a?b=c&d=e#f)"), "[t|https://e.com/a?b=c&d=e#f]"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	// And a real pipe still percent-encodes as it always did.
+	if got, want := ToWiki("[t](https://e.com/?a=1|b)"), "[t|https://e.com/?a=1%7Cb]"; got != want {
+		t.Errorf("pipe: got %q, want %q", got, want)
+	}
+}
