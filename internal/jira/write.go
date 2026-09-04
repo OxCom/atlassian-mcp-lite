@@ -187,14 +187,32 @@ func (m module) handleTransition(ctx context.Context, raw json.RawMessage) (any,
 		}
 	}
 
-	if len(matched) == 0 {
-		// The list is withheld when read is off; see candidateSuffix.
-		return nil, fmt.Errorf("jira_transition: %s has no transition to %q (%d available%s); use an exact transition name",
-			key, want, len(available), m.candidateSuffix(available))
-	}
-	if len(matched) > 1 {
+	if len(matched) != 1 {
+		// The list is withheld when read is off; see candidateSuffix. It is
+		// also withheld when the read allowlist does not cover this issue: the
+		// transitions are metadata about an issue the operator has said this
+		// deployment may not read, and a write permission is not a read
+		// permission. Resolved only on the error paths, so a successful move
+		// never pays for the round trip.
+		shown := available
+		if err := m.authorizeRead(ctx, key); err != nil {
+			shown = nil
+		}
+		if shown == nil {
+			// The count is workflow metadata too: how many transitions a
+			// status offers describes the workflow of a project this
+			// deployment may not read. Withheld with the names.
+			if len(matched) == 0 {
+				return nil, fmt.Errorf("jira_transition: %s has no transition to %q; use an exact transition name", key, want)
+			}
+			return nil, fmt.Errorf("jira_transition: %q does not identify exactly one transition on %s; use the transition id", want, key)
+		}
+		if len(matched) == 0 {
+			return nil, fmt.Errorf("jira_transition: %s has no transition to %q (%d available%s); use an exact transition name",
+				key, want, len(available), m.candidateSuffix(shown))
+		}
 		return nil, fmt.Errorf("jira_transition: %q matches %d transitions on %s%s; use the transition id",
-			want, len(matched), key, m.candidateSuffix(available))
+			want, len(matched), key, m.candidateSuffix(shown))
 	}
 	chosen := -1
 	for i := range matched {
@@ -234,7 +252,7 @@ func (m module) authorizeWrite(ctx context.Context, key string) error {
 		return err
 	}
 	if !m.cfg.AllowProject(current) {
-		return fmt.Errorf("issue %s now lives in project %s, which is not permitted by ATLAS_WRITE_PROJECTS", key, current)
+		return m.movedIssueRefusal("issue", key, current)
 	}
 	return nil
 }

@@ -145,7 +145,7 @@ func (m module) handleUpdate(ctx context.Context, raw json.RawMessage) (any, err
 			return nil, fmt.Errorf("jira_update: %w", err)
 		}
 		if !m.cfg.AllowProject(current) {
-			return nil, fmt.Errorf("jira_update: issue %s now lives in project %q, which is not permitted by ATLAS_WRITE_PROJECTS", key, current)
+			return nil, fmt.Errorf("jira_update: %w", m.movedIssueRefusal("issue", key, current))
 		}
 		// Versions are looked up in the project that actually holds the issue.
 		project = current
@@ -254,7 +254,7 @@ func (m module) currentProjectOf(ctx context.Context, key string) (string, error
 		return "", err
 	}
 	if res.Fields.Project.Key == "" {
-		return "", fmt.Errorf("issue %s returned no project, so the write allowlist cannot be checked", key)
+		return "", fmt.Errorf("issue %s returned no project, so the allowlist cannot be checked", key)
 	}
 	return res.Fields.Project.Key, nil
 }
@@ -281,7 +281,7 @@ func (m module) authorizeLinkTarget(ctx context.Context, field, key string) erro
 		return fmt.Errorf("%s %q: %w", field, key, err)
 	}
 	if !m.cfg.AllowProject(current) {
-		return fmt.Errorf("%s %q now lives in project %q, which is not permitted by ATLAS_WRITE_PROJECTS", field, key, current)
+		return m.movedIssueRefusal(field, key, current)
 	}
 	return nil
 }

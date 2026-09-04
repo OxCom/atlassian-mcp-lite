@@ -149,6 +149,15 @@ func (m module) handleCreatePage(ctx context.Context, raw json.RawMessage) (any,
 				return nil, fmt.Errorf("confluence_create_page: parent_id: %w", err)
 			}
 			if !strings.EqualFold(strings.TrimSpace(parentSpace), space) {
+				// The parent's space is named only when the read allowlist
+				// covers it: otherwise the error would report where a page the
+				// caller may not read actually lives. With no read allowlist
+				// AllowReadSpace is true and the message is unchanged.
+				if !m.cfg.AllowReadSpace(parentSpace) {
+					return nil, fmt.Errorf(
+						"confluence_create_page: parent page %s is not in the requested space %s; a child page is created in its parent's space, so refusing",
+						pid, quoteKey(space))
+				}
 				return nil, fmt.Errorf(
 					"confluence_create_page: parent page %s is in space %s, not the requested space %s; a child page is created in its parent's space, so refusing",
 					pid, quoteKey(parentSpace), quoteKey(space))
@@ -287,11 +296,16 @@ func (m module) handleUpdatePage(ctx context.Context, raw json.RawMessage) (any,
 			return nil, fmt.Errorf("confluence_update_page: %w", err)
 		}
 		if !m.cfg.AllowSpace(key) {
-			return nil, fmt.Errorf("confluence_update_page: writes to space %s are not permitted by ATLAS_WRITE_SPACES", quoteKey(key))
+			return nil, m.deniedWriteSpace("confluence_update_page", key)
 		}
 	}
 
 	title := current.Title
+	// The page's existing title is third-party text read out of a space this
+	// deployment may not be allowed to read. It is still sent upstream —
+	// omitting it would blank the title — but it must not come back to the
+	// caller, so the result reports only a title the caller itself supplied.
+	echoTitle := strings.TrimSpace(in.Title) != "" || m.readableSpaceOfPage(ctx, id)
 	if strings.TrimSpace(in.Title) != "" {
 		title = in.Title
 	}
@@ -321,8 +335,14 @@ func (m module) handleUpdatePage(ctx context.Context, raw json.RawMessage) (any,
 	}
 	// title is either the caller's own or the current one read back from
 	// Confluence; the second is third-party text, and telling them apart here
-	// would buy nothing over treating both as the read path does.
-	return map[string]any{fieldID: res.ID, fieldTitle: markup.SafeText(title), fieldVersion: written}, nil
+	// would buy nothing over treating both as the read path does. It is
+	// withheld entirely when it came from Confluence and the read allowlist
+	// does not cover the page's space.
+	out := map[string]any{fieldID: res.ID, fieldVersion: written}
+	if echoTitle {
+		out[fieldTitle] = markup.SafeText(title)
+	}
+	return out, nil
 }
 
 func (m module) commentDecl() core.ToolDecl {
@@ -378,7 +398,7 @@ func (m module) handleComment(ctx context.Context, raw json.RawMessage) (any, er
 			return nil, fmt.Errorf("confluence_comment: %w", err)
 		}
 		if !m.cfg.AllowSpace(key) {
-			return nil, fmt.Errorf("confluence_comment: writes to space %s are not permitted by ATLAS_WRITE_SPACES", quoteKey(key))
+			return nil, m.deniedWriteSpace("confluence_comment", key)
 		}
 	}
 
@@ -441,13 +461,19 @@ func (m module) spaceKeyForPage(ctx context.Context, pageID string) (string, err
 // a refusal rather than treating "unknown" as "allowed".
 func (m module) spaceKeyFor(ctx context.Context, id string) (string, error) {
 	if strings.TrimSpace(id) == "" {
-		return "", fmt.Errorf("the page reported no owning space, so the write allowlist cannot be checked")
+		return "", fmt.Errorf("the page reported no owning space, so the allowlist cannot be checked")
 	}
 	// The id came from Confluence, not the caller, but it is interpolated
 	// into a URL path all the same, so it passes the same gate.
 	id, err := validNumericID("space id", id)
 	if err != nil {
 		return "", err
+	}
+	// The cache is consulted after validation, so a malformed id never becomes
+	// a cache key, and it is one shared memo for both allowlists rather than a
+	// second lookup mechanism on the read path.
+	if key, ok := m.spaceKeys.get(id); ok {
+		return key, nil
 	}
 	var res struct {
 		Key string `json:"key"`
@@ -456,7 +482,8 @@ func (m module) spaceKeyFor(ctx context.Context, id string) (string, error) {
 		return "", err
 	}
 	if res.Key == "" {
-		return "", fmt.Errorf("space %s returned no key, so the write allowlist cannot be checked", id)
+		return "", fmt.Errorf("space %s returned no key, so the allowlist cannot be checked", id)
 	}
+	m.spaceKeys.put(id, res.Key)
 	return res.Key, nil
 }

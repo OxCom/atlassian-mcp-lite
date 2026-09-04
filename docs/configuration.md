@@ -156,6 +156,98 @@ The variable names are derived from the product names, so a future product
 `foo` would read `ATLAS_FOO_READ`, `ATLAS_FOO_WRITE` and `ATLAS_FOO_DESTRUCTIVE`
 with the same defaults.
 
+### Read allowlists
+
+By default the read tools see every Jira project and every Confluence space the
+account can reach. These narrow that.
+
+| Variable | Default | Rules |
+|---|---|---|
+| `ATLAS_READ_PROJECTS` | unset (all projects) | Comma-separated Jira project keys, e.g. `DEV,PLATFORM,INFRA`. A key starts with a letter and continues with letters, digits and underscore; a value that could never name a project, such as `~alice`, is a startup error. |
+| `ATLAS_READ_SPACES` | unset (all spaces) | Comma-separated Confluence space keys, e.g. `ENG,ARCHITECTURE`. A leading `~` marks a personal space. |
+
+Unset or empty means unrestricted, which is the behaviour every earlier version
+had. A non-empty list is strict, and matching is case-insensitive. A value that
+is set but yields no keys, such as `,`, is a startup error rather than "allow
+everything". Duplicates are harmless.
+
+The restriction is enforced in the server, not by asking the model for a
+well-behaved query:
+
+- **`jira_search` and `confluence_search`** get the allowlist ANDed onto
+  whatever query the caller sent, with the caller's own query in parentheses:
+  `status = Open` is sent as `(status = Open) AND project IN ("DEV",
+  "PLATFORM")`. The caller's query is never inspected for a project or space
+  clause of its own, so `project = SECRET OR status = Open` becomes
+  `(project = SECRET OR status = Open) AND project IN ("DEV", "PLATFORM")` and
+  returns nothing from `SECRET`. A trailing `ORDER BY` is kept last, where both
+  query languages require it. A query with unbalanced parentheses or an
+  unterminated quoted value is **refused** rather than sent: wrapped, a query
+  like `status = Open) OR (status != Open` would compose into a disjunction
+  whose first half carries no restriction, because `AND` binds tighter than
+  `OR`. Off restriction such a query is passed through untouched, as before —
+  this server does not police query syntax, only its own clause.
+- **`jira_get`** does not trust the issue key's prefix, because Jira keeps every
+  key an issue has ever had resolving to it: `DEV-123` may today live in
+  `SECRET`. The issue's project is fetched **in the same request as its
+  content**, and the decision is made on that one response, before any of it is
+  converted or returned. One request rather than two is deliberate: a check
+  followed by a fetch leaves a window in which an issue moves into a forbidden
+  project between them. The `project` field is added to the request only when a
+  list is in force, and is dropped from the result unless the caller asked for
+  it.
+- **Other issues a result mentions are reduced to their keys.** A permitted
+  issue may be the subtask of a forbidden epic, or linked to one, so under a
+  read allowlist the embedded field block of every *other* issue — `parent`,
+  `subtasks`, `issuelinks`, and whatever `*all` returns — is dropped. The key
+  survives, because the caller needs it to ask `jira_get`, which then makes its
+  own decision.
+- **`confluence_get_page`** does the same with the page's current `spaceId`,
+  which is resolved to a space key and checked against the list. A page that
+  has moved out of a listed space stops being readable. The id-to-key mapping
+  is cached for ten minutes, so a second read of the same space costs no extra
+  request while a space-key rename cannot stay wrong for longer than that. The
+  space check also runs before the page's version is validated, so which
+  refusal comes back is not a way to probe a page in a space you cannot read.
+- **Errors say nothing about what was refused.** A refusal is
+  `access denied: … is not in a Jira project permitted by the configured read
+  allowlist (ATLAS_READ_PROJECTS)` — no title, no body, no field values, and
+  not even the project or space the resource turned out to be in. The refusal
+  is logged by the server with the tool name and the resource the caller asked
+  for, which is what an operator needs to spot a misconfigured list.
+- **A write permission is not a read permission.** Where a write tool's result
+  or error would have carried something read out of Atlassian — the versions of
+  a project, the transitions available on an issue, their counts, the project or
+  space a moved resource turned out to be in, a page's existing title when the
+  caller supplied none — it is withheld when the read allowlist does not cover
+  that project or space, even though the write itself was allowed. With no read
+  list in force every one of those messages is exactly what it always was.
+
+Known limits, all of them deliberate:
+
+- **Jira's own JQL validation is an existence oracle.** A query naming a single
+  issue in a forbidden project (`key = SECRET-1`) can come back as an upstream
+  validation error rather than as zero results, which tells the caller the key
+  exists. No issue data is returned either way.
+- **A Confluence page body reaches the server before the space check.** The v2
+  page endpoint has no field selection, so the body arrives with the response
+  that names the space. It is never converted, never returned and never logged;
+  only its size appears in a debug log line.
+- **An allowlisted Jira key is quoted into JQL**, where Jira resolves a quoted
+  value by project key *or* project name. A list naming a key that does not
+  exist, while some other project is *named* that string, would match that
+  project in search. Check the keys against *Projects → View all projects*.
+- **A write tool's own answer still reports what it did** — the status a
+  transition moved an issue to, the version an update wrote — on a project or
+  space the write allowlist permitted, whatever the read list says.
+
+Both lists are independent of the write lists below: a project may be readable
+without being writable, and the reverse. Neither list replaces Atlassian's own
+permissions — **the account's permissions remain the primary boundary**, and a
+dedicated service account restricted to what you actually need is still the
+right way to deploy this server. The allowlists are a second, narrower fence
+inside that.
+
 ### Write allowlists
 
 By default writes may go to every Jira project and every Confluence space the
@@ -169,8 +261,9 @@ account can reach. These narrow that.
 A non-empty list is strict. A write or destructive call aimed at anything not
 listed is refused before any request is made, and `jira_update` also refuses to
 move an issue into or out of an unlisted project. Matching is case-insensitive.
-Reads are never restricted. A value that is set but yields no keys, such as `,`,
-is a startup error rather than "allow everything".
+Reads follow `ATLAS_READ_PROJECTS` / `ATLAS_READ_SPACES` instead, independently.
+A value that is set but yields no keys, such as `,`, is a startup error rather
+than "allow everything".
 
 While a list is in force, two further checks run, each costing one extra
 request and skipped entirely when no list is set:

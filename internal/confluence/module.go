@@ -70,6 +70,10 @@ var rePageID = regexp.MustCompile(`^\d+$`)
 type module struct {
 	cfg    core.Config
 	client *core.Client
+	// spaceKeys memoises space id to space key resolution, which both
+	// allowlists need and neither should repeat per call. It is nil in a
+	// declaration-only module, which makes no requests.
+	spaceKeys *spaceKeyCache
 }
 
 // New returns a declaration-only module for domain discovery.
@@ -77,7 +81,7 @@ func New() core.Module { return module{} }
 
 // NewWith returns a functional module.
 func NewWith(cfg core.Config, c *core.Client) core.Module {
-	return module{cfg: cfg, client: c}
+	return module{cfg: cfg, client: c, spaceKeys: newSpaceKeyCache()}
 }
 
 func (m module) Domain() string { return Domain }

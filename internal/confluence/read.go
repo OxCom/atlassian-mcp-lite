@@ -64,6 +64,13 @@ func (m module) handleSearch(ctx context.Context, raw json.RawMessage) (any, err
 	}
 	limit := m.cfg.ClampLimit(in.Limit)
 
+	// The read allowlist is added after the caller's own length bound: the
+	// bound governs what the caller may send, not what this server appends.
+	cql, err := applyReadSpaceFilter(in.CQL, m.cfg.ReadSpaces)
+	if err != nil {
+		return nil, fmt.Errorf("confluence_search: %w", err)
+	}
+
 	var res struct {
 		Results []struct {
 			Title string `json:"title"`
@@ -88,7 +95,7 @@ func (m module) handleSearch(ctx context.Context, raw json.RawMessage) (any, err
 		} `json:"_links"`
 	}
 	// The v2 API has no CQL search path, so search stays on v1.
-	q := url.Values{"cql": {in.CQL}, "limit": {strconv.Itoa(limit)}}
+	q := url.Values{"cql": {cql}, "limit": {strconv.Itoa(limit)}}
 	if err := m.client.Do(ctx, http.MethodGet, "/wiki/rest/api/search", q, nil, &res); err != nil {
 		return nil, err
 	}
@@ -239,6 +246,19 @@ func (m module) handleGetPage(ctx context.Context, raw json.RawMessage) (any, er
 	}
 	if err := m.client.Do(ctx, http.MethodGet, "/wiki/api/v2/pages/"+url.PathEscape(id), q, nil, &res); err != nil {
 		return nil, err
+	}
+	// A page id says nothing about the space that owns the page, and a page
+	// can be moved between spaces, so the space the page reports right now is
+	// what the allowlist is checked against. The check runs before anything
+	// from the page is put into a result, so a denied page contributes neither
+	// body nor title to what the caller sees.
+	//
+	// It also runs before the version is validated. The other way round, a
+	// page in a forbidden space could be told apart by which refusal came
+	// back — "no usable version number" against "access denied" — which is a
+	// property of the page the caller was not allowed to learn.
+	if err := m.authorizeReadSpaceID(ctx, "page "+id, res.SpaceID); err != nil {
+		return nil, fmt.Errorf("confluence_get_page: %w", err)
 	}
 	if res.Version == nil || res.Version.Number < 1 {
 		return nil, fmt.Errorf("confluence_get_page: page %s returned no usable version number", id)

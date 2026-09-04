@@ -104,9 +104,17 @@ func (m module) handleSearch(ctx context.Context, raw json.RawMessage) (any, err
 	}
 	limit := m.cfg.ClampLimit(in.Limit)
 
+	// The read allowlist is applied to the caller's JQL after its own length
+	// bound, not before: the bound is on what the caller may send, and the
+	// clause this server adds is not the caller's to be charged for.
+	jql, err := applyReadProjectFilter(in.JQL, m.cfg.ReadProjects)
+	if err != nil {
+		return nil, fmt.Errorf("jira_search: %w", err)
+	}
+
 	// JQL travels as a JSON body value, never concatenated into a URL.
 	body := map[string]any{
-		"jql":        in.JQL,
+		"jql":        jql,
 		"maxResults": limit,
 		fieldsParam:  m.toUpstreamFields(fields),
 	}
@@ -205,16 +213,38 @@ func (m module) handleGet(ctx context.Context, raw json.RawMessage) (any, error)
 	if err != nil {
 		return nil, fmt.Errorf("jira_get: %w", err)
 	}
+	// Under a read allowlist the issue's project is fetched in the SAME request
+	// as its content, and the authorization decision is made on that one
+	// response. Two requests — check the project, then fetch the issue — would
+	// leave a window in which an issue moves from a permitted project into a
+	// forbidden one between them and is served anyway. One response cannot
+	// disagree with itself.
+	upstream := m.toUpstreamFields(fields)
+	injectedProject := false
+	if m.cfg.RestrictsReadProjects() && !fieldsInclude(fields, fieldProject) {
+		upstream = append(upstream, fieldProject)
+		injectedProject = true
+	}
 
 	// v2 returns rich-text fields as wiki markup, which markup.FromWiki turns
 	// into markdown. v3 would return ADF, which we deliberately do not parse.
-	q := url.Values{fieldsParam: {strings.Join(m.toUpstreamFields(fields), ",")}}
+	q := url.Values{fieldsParam: {strings.Join(upstream, ",")}}
 	var res struct {
 		Key    string                     `json:"key"`
 		Fields map[string]json.RawMessage `json:"fields"`
 	}
 	if err := m.client.Do(ctx, http.MethodGet, "/rest/api/2/issue/"+url.PathEscape(key), q, nil, &res); err != nil {
 		return nil, err
+	}
+	// Decided before any of the response is flattened, converted or returned,
+	// so a denied issue contributes nothing to what the caller sees.
+	if err := m.authorizeFetchedIssue(key, res.Fields); err != nil {
+		return nil, fmt.Errorf("jira_get: %w", err)
+	}
+	if injectedProject {
+		// The caller did not ask for the project; it was fetched for the
+		// allowlist check alone and is not part of the answer.
+		delete(res.Fields, fieldProject)
 	}
 
 	// The validated key is preferred over the one in the body: it is
@@ -268,6 +298,9 @@ func (m module) flatten(key string, fields map[string]json.RawMessage, wiki bool
 	if wiki {
 		text = markup.FromWiki
 	}
+	// Under a read allowlist, anything this walk finds that describes a
+	// *different* issue is reduced to its key; see scrubLinkedIssues.
+	restricted := m.cfg.RestrictsReadProjects()
 	for name, raw := range fields {
 		// The rename happens first so every later decision, including the null
 		// case, keys the value by the name the caller actually asked for.
@@ -300,7 +333,7 @@ func (m module) flatten(key string, fields map[string]json.RawMessage, wiki bool
 		case "comment":
 			v, ok = commentValue(raw)
 		case "parent":
-			v, ok = parentValue(raw)
+			v, ok = parentValue(raw, m.cfg.RestrictsReadProjects())
 		case fieldStatus, "issuetype", "priority", "resolution":
 			v, ok = namedValue(raw)
 		case "assignee", "reporter", "creator":
@@ -310,7 +343,7 @@ func (m module) flatten(key string, fields map[string]json.RawMessage, wiki bool
 		default:
 			var g any
 			if json.Unmarshal(raw, &g) == nil {
-				v, ok = convertText(scrubPassthrough(g), text), true
+				v, ok = convertText(scrubLinkedIssues(scrubPassthrough(g), restricted), text), true
 			}
 		}
 		if !ok {
@@ -322,7 +355,7 @@ func (m module) flatten(key string, fields map[string]json.RawMessage, wiki bool
 			// would have vetted.
 			var g any
 			if json.Unmarshal(raw, &g) == nil {
-				out[name] = convertText(scrubPassthrough(g), text)
+				out[name] = convertText(scrubLinkedIssues(scrubPassthrough(g), restricted), text)
 			} else {
 				out[name] = raw
 			}
@@ -363,6 +396,47 @@ func scrubPassthrough(v any) any {
 	case []any:
 		for i, child := range t {
 			t[i] = scrubPassthrough(child)
+		}
+	}
+	return v
+}
+
+// scrubLinkedIssues drops the embedded field block of every *other* issue a
+// result mentions, when a read allowlist is in force.
+//
+// `parent`, `subtasks`, `issuelinks` and whatever `*all` brings back carry
+// nested issue objects of the form {"key": "SECRET-1", "fields": {"summary":
+// …}}. The allowlist decides which project's issues may be read, and the issue
+// the caller asked for passing that test says nothing about the issues it links
+// to: a permitted issue may be the subtask of a forbidden epic, or linked to
+// one. Without this, `jira_get` with `+issuelinks` or `*all` returned the
+// summaries of issues in projects the operator excluded.
+//
+// The key survives. It identifies rather than describes, the caller usually
+// needs it to ask for that issue through jira_get — where the allowlist gets
+// its own say — and dropping the whole object would leave the model unable to
+// tell a hidden link from no link.
+//
+// A no-op when unrestricted: the walk is skipped entirely rather than running
+// and changing nothing.
+func scrubLinkedIssues(v any, restricted bool) any {
+	if !restricted {
+		return v
+	}
+	switch t := v.(type) {
+	case map[string]any:
+		// Both keys together are what identifies an embedded issue. The
+		// flattened top-level result has a key and no "fields" member, so it
+		// is not touched by this test.
+		if _, hasKey := t[fieldKey]; hasKey {
+			delete(t, fieldsParam)
+		}
+		for k, child := range t {
+			t[k] = scrubLinkedIssues(child, restricted)
+		}
+	case []any:
+		for i, child := range t {
+			t[i] = scrubLinkedIssues(child, restricted)
 		}
 	}
 	return v
@@ -502,7 +576,7 @@ func namedValue(raw json.RawMessage) (any, bool) {
 // the key is in `key` and the human-readable half is in `fields.summary`, so
 // treating it like any other named object drops the summary and forces a second
 // call to learn what the parent is.
-func parentValue(raw json.RawMessage) (any, bool) {
+func parentValue(raw json.RawMessage, restricted bool) (any, bool) {
 	var v struct {
 		Key    string `json:"key"`
 		Fields struct {
@@ -512,7 +586,16 @@ func parentValue(raw json.RawMessage) (any, bool) {
 	if json.Unmarshal(raw, &v) != nil {
 		return nil, false
 	}
+	// A parent is a different issue, and a parent in a hierarchy above an
+	// allowed project may itself live outside the read allowlist. Its key
+	// stays — the caller needs it to ask for the parent through jira_get,
+	// which will make its own decision — but its summary is content of an
+	// issue this deployment has not authorised reading, so under a read
+	// allowlist only the key is returned.
 	summary := markup.SafeText(v.Fields.Summary)
+	if restricted {
+		summary = ""
+	}
 	switch {
 	case v.Key != "" && summary != "":
 		return v.Key + " (" + summary + ")", true

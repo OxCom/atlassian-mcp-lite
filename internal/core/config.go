@@ -25,6 +25,11 @@ var (
 	// Jira project keys and Confluence space keys travel in URL paths and in
 	// JQL/CQL. Confluence personal spaces are prefixed with "~".
 	keyRe = regexp.MustCompile(`^~?[A-Za-z0-9_]+$`)
+	// A Jira project key is narrower: it starts with a letter and has no
+	// personal-space form. The project allowlists are validated against this
+	// so a value that could never name a project fails at startup rather than
+	// silently denying every read.
+	projectKeyRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
 	// A Jira field id is a JSON object key and a query-string value.
 	fieldIDRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
 )
@@ -59,6 +64,12 @@ type Config struct {
 
 	Domains map[string]Caps
 
+	// Read and write allowlists are independent: naming a project in one says
+	// nothing about the other. Both are empty by default, and empty means
+	// unrestricted — the Atlassian account's own permissions stay the primary
+	// boundary.
+	ReadProjects  []string
+	ReadSpaces    []string
 	WriteProjects []string
 	WriteSpaces   []string
 
@@ -161,9 +172,17 @@ func Load(getenv func(string) string, domains []string) (Config, error) {
 	for _, list := range []struct {
 		name string
 		dst  *[]string
+		// pattern is product-specific. A Jira project key cannot start with a
+		// digit and has no tilde form, so validating one against the shared
+		// key pattern would accept a policy entry that can never match a real
+		// project — the list would load cleanly and then fail closed at
+		// runtime, which is the worst place to learn about a typo.
+		pattern *regexp.Regexp
 	}{
-		{"ATLAS_WRITE_PROJECTS", &cfg.WriteProjects},
-		{"ATLAS_WRITE_SPACES", &cfg.WriteSpaces},
+		{"ATLAS_READ_PROJECTS", &cfg.ReadProjects, projectKeyRe},
+		{"ATLAS_READ_SPACES", &cfg.ReadSpaces, keyRe},
+		{"ATLAS_WRITE_PROJECTS", &cfg.WriteProjects, projectKeyRe},
+		{"ATLAS_WRITE_SPACES", &cfg.WriteSpaces, keyRe},
 	} {
 		raw := getenv(list.name)
 		keys := splitList(raw)
@@ -178,7 +197,7 @@ func Load(getenv func(string) string, domains []string) (Config, error) {
 			// the allowlist could only get there as an injection attempt or a
 			// typo, and an allowlist entry that never matches a real key would
 			// fail closed silently.
-			if !keyRe.MatchString(k) {
+			if !list.pattern.MatchString(k) {
 				return Config{}, fmt.Errorf("%s: %q is not a valid key", list.name, k)
 			}
 		}
@@ -323,6 +342,25 @@ func (c Config) AllowProject(key string) bool { return allowed(c.WriteProjects, 
 
 // AllowSpace reports whether writes to a Confluence space key are permitted.
 func (c Config) AllowSpace(key string) bool { return allowed(c.WriteSpaces, key) }
+
+// AllowReadProject reports whether reads of a Jira project are permitted, and
+// AllowReadSpace the same for a Confluence space. They share the membership
+// test with the write pair — one folding rule, one meaning of "empty" — while
+// consulting a separate list, so a project may be readable without being
+// writable and the reverse.
+func (c Config) AllowReadProject(key string) bool { return allowed(c.ReadProjects, key) }
+
+// AllowReadSpace reports whether reads of a Confluence space key are permitted.
+func (c Config) AllowReadSpace(key string) bool { return allowed(c.ReadSpaces, key) }
+
+// RestrictsReadProjects reports whether a Jira read allowlist is in force at
+// all, and RestrictsReadSpaces the same for Confluence. A module uses these to
+// decide whether to pay for the round trip that resolves where a resource
+// actually lives: with no allowlist there is nothing to check it against.
+func (c Config) RestrictsReadProjects() bool { return len(c.ReadProjects) > 0 }
+
+// RestrictsReadSpaces reports whether a Confluence read allowlist is in force.
+func (c Config) RestrictsReadSpaces() bool { return len(c.ReadSpaces) > 0 }
 
 // RestrictsProjects and RestrictsSpaces report whether an allowlist is in force
 // at all. A module uses these to decide whether an extra verification round

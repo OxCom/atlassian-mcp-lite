@@ -260,15 +260,36 @@ for the site's Epic Link custom field, see `ATLAS_EPIC_FIELD_ID`. The Confluence
 page tool has a fixed field vocabulary and no `*all`. Where to find the name of
 a field is covered in [`docs/configuration.md`](docs/configuration.md).
 
-## Restricting which projects and spaces can be changed
+## Restricting which projects and spaces are visible and changeable
 
-By default the server may **write to every Jira project and every Confluence
-space** the account can reach. Two allowlists narrow that:
+By default the server may **read and write every Jira project and every
+Confluence space** the account can reach. Four allowlists narrow that, two per
+direction:
 
 ```bash
-ATLAS_WRITE_PROJECTS=PROJ,OPS        # Jira project keys
-ATLAS_WRITE_SPACES=ENG,~jdoe         # Confluence space keys; ~ marks a personal space
+ATLAS_READ_PROJECTS=DEV,PLATFORM,INFRA   # Jira projects the read tools may see
+ATLAS_READ_SPACES=ENG,ARCHITECTURE       # Confluence spaces the read tools may see
+ATLAS_WRITE_PROJECTS=PROJ,OPS            # Jira project keys
+ATLAS_WRITE_SPACES=ENG,~jdoe             # Confluence space keys; ~ marks a personal space
 ```
+
+Read and write are independent: a project may be readable without being
+writable, and the reverse. Unset or empty means unrestricted in both
+directions, so an existing deployment gains no restriction by upgrading.
+
+The read lists are enforced in the server, never by trusting the query the
+model supplies. `jira_search` and `confluence_search` have the allowlist ANDed
+onto the caller's query with the caller's own query parenthesised, so
+`project = SECRET OR status = Open` is sent as
+`(project = SECRET OR status = Open) AND project IN ("DEV", "PLATFORM")` and
+returns nothing from `SECRET`; a query the wrapping cannot bind — unbalanced
+parentheses, an unterminated quote — is refused instead of sent. `jira_get`
+fetches the issue's project in the same request as its content and decides on
+that one response, so an old key that still resolves after a move buys nothing
+and no move between two requests can slip through. `confluence_get_page` checks
+the space the page reports now, and other issues a result mentions are reduced
+to their keys. A refusal is a bare `access denied`: no title, no body, and not
+even the project or space the resource turned out to be in.
 
 A non-empty list is strict: a write or destructive call aimed anywhere else is
 refused before any request is made, and a move into or out of a listed
@@ -278,8 +299,8 @@ project the issue is in *now* is what is checked. An `epic` or `parent` key
 passed to `jira_update` must be in an allowed project too, since linking gives
 that issue a child in its own hierarchy. For the same reason
 `confluence_create_page` refuses a `parent_id` whose page is in a different
-space from the one requested: a child page is created in its parent's space. Reads are never restricted — search and get
-see whatever the account sees. Matching is case-insensitive. A list that is set
+space from the one requested: a child page is created in its parent's space.
+Matching is case-insensitive. A list that is set
 but names no keys (`,`) is a startup error, not "allow everything".
 
 Set both on any shared site. The API token carries the full authority of its
@@ -312,6 +333,7 @@ The short version:
 | `ATLAS_JIRA_READ` / `ATLAS_CONFLUENCE_READ` | `true` | Read tools |
 | `ATLAS_JIRA_WRITE` / `ATLAS_CONFLUENCE_WRITE` | `false` | Write tools |
 | `ATLAS_JIRA_DESTRUCTIVE` / `ATLAS_CONFLUENCE_DESTRUCTIVE` | `false` | Destructive tools |
+| `ATLAS_READ_PROJECTS` / `ATLAS_READ_SPACES` | unrestricted | Read allowlists |
 | `ATLAS_WRITE_PROJECTS` / `ATLAS_WRITE_SPACES` | unrestricted | Write allowlists |
 | `ATLAS_LIMIT_DEFAULT` / `ATLAS_LIMIT_MAX` | `20` / `50` | Result counts |
 | `ATLAS_LOG` | `info` | `info` or `debug` |
@@ -331,8 +353,11 @@ key — are in [`docs/configuration.md`](docs/configuration.md).
   is a symbolic link, whose owner would decide what the server actually reads,
   and a file belonging to another user, which would be their credential rather
   than yours.
-- **Set the write allowlists.** See the section above. Unset means
-  unrestricted, which is rarely what you want in a shared site.
+- **Set the allowlists.** See the section above. Unset means unrestricted in
+  both directions, which is rarely what you want on a shared site. The
+  allowlists are enforced by this server; the account's own Atlassian
+  permissions remain the primary boundary, so a dedicated service account
+  restricted to what you need is still the right way to deploy this.
 - **The image is minimal by construction.** The binary is CGO-free and static,
   the final stage is `scratch` with no shell and no package manager, and it
   runs as uid 65532 unless you pass `--user`. The compose service adds
@@ -344,6 +369,10 @@ key — are in [`docs/configuration.md`](docs/configuration.md).
   `ATLAS_WRITE_PROJECTS` / `ATLAS_WRITE_SPACES` confine writes to projects and
   spaces you name, checked against the target's current project or space
   rather than its key prefix.
+- **Read capability is the blast radius of an over-permissioned token.**
+  `ATLAS_READ_PROJECTS` / `ATLAS_READ_SPACES` bound what an injected prompt can
+  ask this server to fetch and hand to the model, whatever JQL or CQL it
+  manages to get the model to send.
 - **This server does not sandbox your MCP client.** Issue and page text is
   attacker-influenceable input that enters the model's context. This server
   accepts no filesystem paths, but the client driving it may have its own file

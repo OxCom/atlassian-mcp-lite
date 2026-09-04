@@ -70,6 +70,16 @@ classes with their meaning; pre-select **read only**:
 > - [ ] write — create pages, add comments
 > - [ ] destructive — replace a page body
 
+For every product the user keeps read on, ask:
+
+> Restrict what the assistant may **read** in **Jira** to specific projects?
+> Enter project keys separated by commas (for example `DEV,PLATFORM,INFRA`), or
+> leave empty to allow every project the account can reach.
+
+> Restrict what the assistant may **read** in **Confluence** to specific spaces?
+> Enter space keys separated by commas (for example `ENG,ARCHITECTURE`), or
+> leave empty to allow every space.
+
 If the user picks write or destructive for a product, ask one follow-up:
 
 > Restrict **Jira** writes to specific projects? Enter project keys separated by
@@ -79,13 +89,20 @@ If the user picks write or destructive for a product, ask one follow-up:
 > Restrict **Confluence** writes to specific spaces? Enter space keys separated
 > by commas (for example `ENG,~jdoe`), or leave empty to allow every space.
 
+The read lists and the write lists are independent: answering one says nothing
+about the other. A read list is enforced by the server on every read path — the
+allowlist is ANDed onto whatever JQL or CQL is sent, and a single issue or page
+is checked against the project or space it lives in *now*, not its key.
+
 An allowlist also covers the other end of a link: an `epic` or `parent` given
 to `jira_update` must be in a listed project, and a `parent_id` given to
 `confluence_create_page` must be in the space the call names.
 
-Explain in one line that the token has the full authority of its account and
-that on a shared site the allowlist is the only thing stopping an unwanted edit
-elsewhere.
+Explain in one line that the token has the full authority of its account, that
+on a shared site the allowlists are the only thing stopping an unwanted edit or
+an unwanted disclosure elsewhere, and that the account's own Atlassian
+permissions remain the primary boundary — a dedicated service account limited
+to what is needed is still recommended.
 
 ## Step 3 — Connection details
 
@@ -133,6 +150,11 @@ ATLAS_JIRA_DESTRUCTIVE=false
 ATLAS_CONFLUENCE_WRITE=false
 ATLAS_CONFLUENCE_DESTRUCTIVE=false
 
+# Read allowlists. Unset or empty means every project / space the account can
+# reach. Independent of the write lists below.
+#ATLAS_READ_PROJECTS=DEV,PLATFORM,INFRA
+#ATLAS_READ_SPACES=ENG,ARCHITECTURE
+
 # Write allowlists. Unset means every project / space the account can reach.
 #ATLAS_WRITE_PROJECTS=PROJ,OPS
 #ATLAS_WRITE_SPACES=ENG,~jdoe
@@ -168,7 +190,9 @@ Fill in the answers from Steps 1–3:
 
 - a product not selected in Step 1 → `ATLAS_<PRODUCT>_READ=false`;
 - each class selected in Step 2 → `ATLAS_<PRODUCT>_<CLASS>=true`;
-- a non-empty allowlist → uncomment and fill `ATLAS_WRITE_PROJECTS` /
+- a non-empty read allowlist → uncomment and fill `ATLAS_READ_PROJECTS` /
+  `ATLAS_READ_SPACES`;
+- a non-empty write allowlist → uncomment and fill `ATLAS_WRITE_PROJECTS` /
   `ATLAS_WRITE_SPACES`.
 
 Then tell the user, verbatim:

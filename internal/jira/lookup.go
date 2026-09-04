@@ -155,6 +155,13 @@ func (m module) versionIDFor(ctx context.Context, projectKey, name string) (stri
 		return "", err
 	}
 
+	// Version names are project metadata. A deployment whose read allowlist
+	// excludes this project has said its caller may not read the project, so
+	// the names stay out of the error even though the write itself was
+	// permitted. With no read allowlist AllowReadProject is true and nothing
+	// changes.
+	disclose := m.cfg.AllowReadProject(projectKey)
+
 	var folded []string
 	available := make([]string, 0, len(versions))
 	for _, v := range versions {
@@ -173,6 +180,13 @@ func (m module) versionIDFor(ctx context.Context, projectKey, name string) (stri
 	if len(folded) > 1 {
 		return "", fmt.Errorf("%q matches %d versions in %s differing only by case; use the exact name",
 			name, len(folded), projectKey)
+	}
+	if !disclose {
+		// How many versions a project has, and whether it has any at all, are
+		// facts about a project this deployment may not read. Withheld with
+		// the names; the name the caller asked for and the project it named
+		// are its own.
+		return "", fmt.Errorf("no version named %q in %s; use an exact version name", name, projectKey)
 	}
 	if len(available) == 0 {
 		return "", fmt.Errorf("no version named %q in %s; the project has no versions", name, projectKey)
