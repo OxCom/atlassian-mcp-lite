@@ -178,6 +178,14 @@ func (m module) versionIDFor(ctx context.Context, projectKey, name string) (stri
 		return folded[0], nil
 	}
 	if len(folded) > 1 {
+		// The count is a fact about a project this deployment may not read —
+		// it says how many versions exist there whose names differ from the
+		// caller's only by case — so it follows the same gate as the names
+		// below. The caller still learns that its own value was not exact,
+		// which is what it needs to fix the call.
+		if !disclose {
+			return "", fmt.Errorf("%q is not an exact version name in %s; use the exact name", name, projectKey)
+		}
 		return "", fmt.Errorf("%q matches %d versions in %s differing only by case; use the exact name",
 			name, len(folded), projectKey)
 	}

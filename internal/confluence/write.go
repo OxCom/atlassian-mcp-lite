@@ -3,6 +3,7 @@ package confluence
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -272,6 +273,27 @@ func (m module) handleUpdatePage(ctx context.Context, raw json.RawMessage) (any,
 	if err := m.client.Do(ctx, http.MethodGet, path, q, nil, &current); err != nil {
 		return nil, err
 	}
+	// The allowlist is keyed by space, and the caller named only a page, so
+	// the owning space is resolved before anything else is decided. Skipped
+	// when the allowlist is empty, which means unrestricted and would cost two
+	// requests to confirm.
+	//
+	// This runs BEFORE the version checks, and the order is the whole point:
+	// the version-mismatch refusal reports the page's current version number,
+	// which is a fact about a page in a space this deployment may be allowed
+	// neither to write nor to read, and the two refusals differ, so a caller
+	// could tell "exists, at version 57" from "not allowed" by which one came
+	// back. confluence_get_page orders these the same way for the same reason.
+	if m.cfg.RestrictsSpaces() {
+		key, err := m.spaceKeyFor(ctx, current.SpaceID)
+		if err != nil {
+			return nil, fmt.Errorf("confluence_update_page: %w", err)
+		}
+		if !m.cfg.AllowSpace(key) {
+			return nil, m.deniedWriteSpace("confluence_update_page", key)
+		}
+	}
+
 	if current.Version == nil || current.Version.Number < 1 {
 		return nil, fmt.Errorf("confluence_update_page: page %s returned no usable version number; refusing to write without an optimistic lock", id)
 	}
@@ -284,20 +306,6 @@ func (m module) handleUpdatePage(ctx context.Context, raw json.RawMessage) (any,
 		return nil, fmt.Errorf(
 			"confluence_update_page: page %s is at version %d, not the version %d this update was based on; someone else edited it, so re-read the page before writing",
 			id, current.Version.Number, basedOn)
-	}
-
-	// The allowlist is keyed by space, and the caller named only a page, so
-	// the owning space is resolved before the write. Skipped when the
-	// allowlist is empty, which means unrestricted and would cost two requests
-	// to confirm.
-	if m.cfg.RestrictsSpaces() {
-		key, err := m.spaceKeyFor(ctx, current.SpaceID)
-		if err != nil {
-			return nil, fmt.Errorf("confluence_update_page: %w", err)
-		}
-		if !m.cfg.AllowSpace(key) {
-			return nil, m.deniedWriteSpace("confluence_update_page", key)
-		}
 	}
 
 	title := current.Title
@@ -479,10 +487,21 @@ func (m module) spaceKeyFor(ctx context.Context, id string) (string, error) {
 		Key string `json:"key"`
 	}
 	if err := m.client.Do(ctx, http.MethodGet, "/wiki/api/v2/spaces/"+url.PathEscape(id), nil, nil, &res); err != nil {
-		return "", err
+		// The upstream error names the path it failed on, and that path
+		// carries the numeric id of the space the page turned out to be in —
+		// a fact about a space the caller may be allowed neither to read nor
+		// to write, learned from a page id alone. Every caller of this
+		// function is deciding an allowlist question, so the failure is
+		// reported without it: the status is kept because it is what tells a
+		// throttled deployment apart from a broken one, and the id is not.
+		var apiErr *core.APIError
+		if errors.As(err, &apiErr) {
+			return "", fmt.Errorf("the owning space could not be resolved (HTTP %d), so the allowlist cannot be checked", apiErr.Status)
+		}
+		return "", fmt.Errorf("the owning space could not be resolved, so the allowlist cannot be checked")
 	}
 	if res.Key == "" {
-		return "", fmt.Errorf("space %s returned no key, so the allowlist cannot be checked", id)
+		return "", fmt.Errorf("the owning space returned no key, so the allowlist cannot be checked")
 	}
 	m.spaceKeys.put(id, res.Key)
 	return res.Key, nil

@@ -3,6 +3,7 @@ package markup
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // linkSchemeRe matches a URL scheme at the start of a target. The character
@@ -22,9 +23,17 @@ var linkSchemeRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
 // on the Atlassian host. Everything else, including schemes this code has
 // never heard of, is refused; deny by default.
 //
-// Whitespace and ASCII control characters are removed before the scheme is
-// read, because HTML parsers tolerate "java\tscript:" and " JAVASCRIPT:" and a
-// check on the raw string would let both through.
+// Whitespace, ASCII control characters and every character in the `invisible`
+// set are removed before the scheme is read, because HTML parsers tolerate
+// "java\tscript:" and " JAVASCRIPT:" and a check on the raw string would let
+// both through.
+//
+// The `invisible` set is the load-bearing half. scrubBody runs on the finished
+// markdown, after this function has already judged the target, so a target
+// carrying a zero-width joiner between "java" and "script:" matches no scheme
+// this regex can see, is let through as a scheme-less relative path, and then
+// has its joiner removed downstream — reassembling a live javascript: link in
+// the text the model reads. Both passes must see the same string.
 //
 // A scheme-less target beginning with two slashes is the exception that makes
 // the "stays on the Atlassian host" claim true: "//evil.example/x" carries no
@@ -33,7 +42,7 @@ var linkSchemeRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
 // "/\host" to the same protocol-relative target.
 func safeLinkTarget(s string) (string, bool) {
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || r == 0x7f || unicode.In(r, invisible) {
 			return -1
 		}
 		return r

@@ -296,6 +296,19 @@ func collectRows(table *html.Node, listDepth int) []htmlRow {
 					if cell.Type != html.ElementNode || (cell.Data != "td" && cell.Data != "th") {
 						continue
 					}
+					// The row is bounded, not just each cell's colspan. The
+					// policy caps one colspan at four digits, but a row is
+					// free to carry as many spanning cells as the page has
+					// room for, and the product is what gets allocated: an
+					// 8 MiB body — the client's own cap — of `<td
+					// colspan="9999">` is some 380 000 cells, which expand to
+					// billions of empty strings long before the finished
+					// result meets maxResultBytes. The bound has to be on the
+					// total, and it has to be here, because this is where the
+					// allocation happens.
+					if len(row.cells) >= maxRowCells {
+						break
+					}
 					if cell.Data == "th" {
 						row.header = true
 					}
@@ -304,7 +317,7 @@ func collectRows(table *html.Node, listDepth int) []htmlRow {
 					row.cells = append(row.cells, tableCell(inner.String()))
 					// A spanning cell would otherwise shorten the row and shift
 					// every cell after it under the wrong heading.
-					for pad := colspan(cell); pad > 1; pad-- {
+					for pad := colspan(cell); pad > 1 && len(row.cells) < maxRowCells; pad-- {
 						row.cells = append(row.cells, "")
 					}
 				}
@@ -349,6 +362,14 @@ func tableCell(s string) string {
 	out = strings.ReplaceAll(out, "\n", " ")
 	return strings.Join(strings.Fields(out), " ")
 }
+
+// maxRowCells is the most cells one table row may contribute, counting the
+// empty ones a colspan pads with. It is a memory bound, not a formatting rule:
+// a markdown table that wide is already unreadable, and the number exists so
+// that a page cannot turn a bounded response body into an unbounded allocation
+// (see the comment at the padding loop). A row that reaches it is truncated,
+// which is a visibly wrong table rather than a wrong answer.
+const maxRowCells = 512
 
 func colspan(cell *html.Node) int {
 	n, err := strconv.Atoi(attr(cell, "colspan"))

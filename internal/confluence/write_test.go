@@ -219,6 +219,62 @@ func TestUpdatePageRefusedByAllowlist(t *testing.T) {
 	}
 }
 
+// The version-mismatch refusal reports the page's current version number, so
+// it must not be reachable for a page in a space the allowlist denies: it
+// would confirm the page exists and report how often it has been edited, and
+// it differs from the allowlist refusal, which makes the pair an oracle.
+// confluence_get_page checks the space before the version for this reason;
+// confluence_update_page did not until 2026-09-04.
+func TestUpdatePageChecksTheSpaceBeforeTheVersion(t *testing.T) {
+	base := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/wiki/api/v2/pages/123":
+			_, _ = io.WriteString(w, `{"id":"123","title":"T","spaceId":"9","version":{"number":57}}`)
+		case "/wiki/api/v2/spaces/9":
+			_, _ = io.WriteString(w, `{"id":"9","key":"SECRET"}`)
+		default:
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}).(module)
+	base.cfg.WriteSpaces = []string{"DOCS"}
+
+	err := callErr(t, base, "confluence_update_page",
+		map[string]any{"id": "123", "body": "x", "version": "1"})
+	if strings.Contains(err.Error(), "57") {
+		t.Errorf("error = %v, want no disclosure of the version of a page in a denied space", err)
+	}
+	if !strings.Contains(err.Error(), "ATLAS_WRITE_SPACES") {
+		t.Errorf("error = %v, want the allowlist refusal", err)
+	}
+}
+
+// A page whose owning space cannot be resolved must not have that space's
+// numeric id handed back: the caller supplied a page id and nothing else, and
+// the id names a space it may be allowed neither to read nor to write.
+func TestSpaceKeyForDoesNotDiscloseTheSpaceID(t *testing.T) {
+	base := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/wiki/api/v2/pages/123":
+			_, _ = io.WriteString(w, `{"id":"123","title":"T","spaceId":"9876543","version":{"number":3}}`)
+		case strings.HasPrefix(r.URL.Path, "/wiki/api/v2/spaces/"):
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"message":"rate limited"}`)
+		default:
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}).(module)
+	base.cfg.WriteSpaces = []string{"DOCS"}
+
+	err := callErr(t, base, "confluence_update_page",
+		map[string]any{"id": "123", "body": "x"})
+	if strings.Contains(err.Error(), "9876543") {
+		t.Errorf("error = %v, want no disclosure of the owning space id", err)
+	}
+	if !strings.Contains(err.Error(), "429") {
+		t.Errorf("error = %v, want the upstream status kept so a throttle is diagnosable", err)
+	}
+}
+
 // A comment is a write, so the space allowlist must apply to it. Without this
 // the allowlist would cover page creation and replacement but not commenting.
 func TestCommentRefusedByAllowlist(t *testing.T) {

@@ -2,6 +2,7 @@ package jira
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -188,6 +189,84 @@ func TestSearchSendsRestrictedJQL(t *testing.T) {
 				t.Errorf("JQL sent = %q, want %q", sent, c.want)
 			}
 		})
+	}
+}
+
+// The injected clause narrows the query; it does not decide what may be shown.
+// JQL's `project` field resolves a value by key, by NAME or by id, so
+// `project IN ("DEV")` also matches a project merely named DEV — and the
+// allowlist is a list of keys. Every returned issue is re-checked against the
+// project it reports, the way jira_get checks the one it fetched.
+func TestSearchDropsIssuesOutsideTheReadAllowlist(t *testing.T) {
+	var sentFields string
+	m := newReadRestrictedModule(t, func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		var in struct {
+			Fields []string `json:"fields"`
+		}
+		if err := json.Unmarshal(body, &in); err != nil {
+			t.Fatalf("unmarshal body: %v", err)
+		}
+		sentFields = strings.Join(in.Fields, ",")
+		w.Header().Set("Content-Type", "application/json")
+		// SECRET-1 came back because the project SECRET is *named* DEV.
+		_, _ = io.WriteString(w, `{"issues":[
+			{"key":"DEV-1","fields":{"summary":"ok","project":{"key":"DEV"}}},
+			{"key":"SECRET-1","fields":{"summary":"leaked","project":{"key":"SECRET"}}},
+			{"key":"NOPROJ-1","fields":{"summary":"unknown"}}
+		],"isLast":true}`)
+	}, "DEV")
+
+	out, ok := call(t, m, "jira_search", map[string]any{"jql": "status = Open"}).(map[string]any)
+	if !ok {
+		t.Fatal("jira_search did not return a map")
+	}
+	if !strings.Contains(sentFields, fieldProject) {
+		t.Errorf("fields sent = %q, want the project the check needs", sentFields)
+	}
+	issues, ok := out["issues"].([]map[string]any)
+	if !ok {
+		t.Fatalf("issues = %T, want []map[string]any", out["issues"])
+	}
+	if len(issues) != 1 {
+		t.Fatalf("returned %d issues, want only the allowlisted one: %v", len(issues), issues)
+	}
+	if issues[0][fieldKey] != "DEV-1" {
+		t.Errorf("kept %v, want DEV-1", issues[0][fieldKey])
+	}
+	// Fetched for the check alone, so it is not part of the answer.
+	if _, present := issues[0][fieldProject]; present {
+		t.Errorf("result carries %q, which the caller did not ask for", fieldProject)
+	}
+}
+
+// Off the allowlist nothing extra is fetched and nothing is dropped: the
+// re-check must cost nothing in the unrestricted deployment.
+func TestSearchAsksForNoExtraFieldWhenUnrestricted(t *testing.T) {
+	var sentFields string
+	m := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var in struct {
+			Fields []string `json:"fields"`
+		}
+		_ = json.Unmarshal(body, &in)
+		sentFields = strings.Join(in.Fields, ",")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"issues":[{"key":"SECRET-1","fields":{"summary":"fine"}}],"isLast":true}`)
+	})
+
+	out, ok := call(t, m, "jira_search", map[string]any{"jql": "status = Open"}).(map[string]any)
+	if !ok {
+		t.Fatal("jira_search did not return a map")
+	}
+	if strings.Contains(sentFields, fieldProject) {
+		t.Errorf("fields sent = %q, want no project fetched when unrestricted", sentFields)
+	}
+	if issues, _ := out["issues"].([]map[string]any); len(issues) != 1 {
+		t.Errorf("returned %d issues, want 1", len(issues))
 	}
 }
 
@@ -391,5 +470,35 @@ func TestTransitionWithholdsCandidatesOutsideTheReadAllowlist(t *testing.T) {
 	err := callErr(t, m, "jira_transition", map[string]any{"key": "SECRET-1", "status": "Done"})
 	if strings.Contains(err.Error(), transitionName) {
 		t.Errorf("error %q discloses workflow metadata of a project outside the read allowlist", err)
+	}
+}
+
+// How many versions of a project exist whose names differ from the caller's
+// only by case is project metadata, so the ambiguous-match refusal follows the
+// same read gate as the "no such version" one below it. The caller still
+// learns its own value was not exact, which is what it needs to fix the call.
+func TestVersionAmbiguityWithholdsTheCountOutsideTheReadAllowlist(t *testing.T) {
+	handler := func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"id":"111","name":"Release"},{"id":"222","name":"RELEASE"}]`)
+	}
+
+	m := newReadRestrictedModule(t, handler, "DEV").(module)
+	_, err := m.versionIDFor(context.Background(), "SECRET", "release")
+	if err == nil {
+		t.Fatal("an ambiguous version must error")
+	}
+	if strings.Contains(err.Error(), "2 versions") {
+		t.Errorf("error = %v, must not count versions in a project outside the read allowlist", err)
+	}
+	if !strings.Contains(err.Error(), "exact") {
+		t.Errorf("error = %v, want it to say an exact name is needed", err)
+	}
+
+	// Inside the allowlist the count is the caller's own to see.
+	m = newReadRestrictedModule(t, handler, "DEV").(module)
+	if _, err = m.versionIDFor(context.Background(), "DEV", "release"); err == nil {
+		t.Fatal("an ambiguous version must error")
+	} else if !strings.Contains(err.Error(), "2 versions") {
+		t.Errorf("error = %v, want the count for a readable project", err)
 	}
 }

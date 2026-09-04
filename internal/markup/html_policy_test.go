@@ -131,6 +131,30 @@ func TestFromHTMLPolicyBoundsColspan(t *testing.T) {
 	}
 }
 
+// The per-attribute bound is not the whole bound. A row may carry as many
+// spanning cells as the page has room for, and the product of the two is what
+// gets allocated — a bounded response body expands into an unbounded number of
+// empty strings well before the finished result is measured against
+// maxResultBytes. The row total is capped for that reason.
+func TestFromHTMLBoundsTotalCellsPerRow(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("<table><tr>")
+	for i := 0; i < 200; i++ {
+		b.WriteString(`<td colspan="9999">x</td>`)
+	}
+	b.WriteString("</tr></table>")
+
+	got := FromHTML(b.String())
+	// Two pipes per cell would be 200*9999 of them; the cap is 512 cells, so
+	// the row plus the separator markdown stays a few thousand characters.
+	if cells := strings.Count(got, "|"); cells > 4*maxRowCells {
+		t.Errorf("row was not bounded: %d pipes, want at most %d", cells, 4*maxRowCells)
+	}
+	if !strings.Contains(got, "x") {
+		t.Errorf("the bounded row lost its content:\n%.200s", got)
+	}
+}
+
 func TestFromHTMLScriptOnlyBodyIsEmpty(t *testing.T) {
 	if got := FromHTML(`<script>alert(1)</script>`); got != "" {
 		t.Errorf("FromHTML = %q, want the empty string", got)

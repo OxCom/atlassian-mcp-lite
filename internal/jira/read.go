@@ -112,11 +112,24 @@ func (m module) handleSearch(ctx context.Context, raw json.RawMessage) (any, err
 		return nil, fmt.Errorf("jira_search: %w", err)
 	}
 
+	// The injected clause is not the only check. JQL's `project` field resolves
+	// a value by key, by name OR by id, so `project IN ("DEV")` also matches a
+	// project whose *name* is DEV whatever its key — and the allowlist is a
+	// list of keys. Every returned issue is therefore re-checked against the
+	// project it reports, exactly as jira_get checks the one it fetched, so the
+	// clause narrows the query and the check decides what may be shown.
+	upstream := m.toUpstreamFields(fields)
+	injectedProject := false
+	if m.cfg.RestrictsReadProjects() && !fieldsInclude(fields, fieldProject) {
+		upstream = append(upstream, fieldProject)
+		injectedProject = true
+	}
+
 	// JQL travels as a JSON body value, never concatenated into a URL.
 	body := map[string]any{
 		"jql":        jql,
 		"maxResults": limit,
-		fieldsParam:  m.toUpstreamFields(fields),
+		fieldsParam:  upstream,
 	}
 
 	var res struct {
@@ -136,6 +149,18 @@ func (m module) handleSearch(ctx context.Context, raw json.RawMessage) (any, err
 
 	issues := make([]map[string]any, 0, len(res.Issues))
 	for _, i := range res.Issues {
+		// Dropped rather than refused: one issue the allowlist does not cover
+		// must not deny the caller the rest of a legitimate result, and a
+		// refusal naming it would disclose the very issue being withheld. The
+		// decision is made before flatten, so a denied issue's content is
+		// never converted, let alone returned.
+		if err := m.authorizeFetchedIssue(i.Key, i.Fields); err != nil {
+			continue
+		}
+		if injectedProject {
+			// Fetched for the allowlist check alone, not part of the answer.
+			delete(i.Fields, fieldProject)
+		}
 		// v3: unknown text fields arrive as ADF, so string leaves get SafeText
 		// rather than a wiki conversion.
 		issues = append(issues, m.flatten(i.Key, i.Fields, false))
