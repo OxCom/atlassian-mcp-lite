@@ -28,7 +28,6 @@ func newTestModule(t *testing.T, h http.HandlerFunc) core.Module {
 		Domains:      map[string]core.Caps{Domain: {Read: true, Write: true, Destructive: true}},
 		LimitDefault: 20,
 		LimitMax:     50,
-		EpicFieldID:  "customfield_10014",
 	}
 	var logs bytes.Buffer
 	return NewWith(cfg, core.NewClient(cfg, core.NewLogger("debug", &logs)))
@@ -68,7 +67,7 @@ func TestModuleDeclaresExpectedToolsAndActions(t *testing.T) {
 		"jira_get":    {core.ActionRead},
 		// jira_update spans both classes; see updateDecl.
 		"jira_update":     {core.ActionWrite, core.ActionDestructive},
-		"jira_transition": {core.ActionDestructive},
+		"jira_transition": {core.ActionWrite},
 		"jira_comment":    {core.ActionWrite},
 		// Creating makes a new object and overwrites nothing, so it is write
 		// only; see createDecl.
@@ -178,44 +177,6 @@ func TestGetUsesV2AndConvertsDescriptionToMarkdown(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "**the**") {
 		t.Errorf("inline emphasis not converted: %s", raw)
-	}
-}
-
-// "epic" is a logical name. It must be translated to the site-specific custom
-// field on the way out and back again on the way in, or the caller sees a field
-// Jira does not have.
-func TestSearchTranslatesLogicalEpicField(t *testing.T) {
-	var body map[string]any
-	m := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		_, _ = io.WriteString(w, `{"issues":[],"isLast":true}`)
-	})
-	call(t, m, "jira_search", map[string]any{"jql": "x", "fields": []string{"+epic"}})
-
-	fields, _ := body["fields"].([]any)
-	names := make([]string, 0, len(fields))
-	for _, f := range fields {
-		names = append(names, f.(string))
-	}
-	if containsField(names, "epic") {
-		t.Error("the literal string \"epic\" must not be sent to Jira")
-	}
-	if !containsField(names, "customfield_10014") {
-		t.Errorf("epic must be translated to the configured custom field: %v", names)
-	}
-}
-
-func TestGetRenamesEpicCustomFieldBackToLogicalName(t *testing.T) {
-	m := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"key":"PROJ-1","fields":{"customfield_10014":"PROJ-9"}}`)
-	})
-	out := call(t, m, "jira_get", map[string]any{"key": "PROJ-1"})
-	raw, _ := json.Marshal(out)
-	if !strings.Contains(string(raw), `"epic":"PROJ-9"`) {
-		t.Errorf("custom field not renamed to epic: %s", raw)
-	}
-	if strings.Contains(string(raw), "customfield_10014") {
-		t.Errorf("raw custom field id leaked to the caller: %s", raw)
 	}
 }
 

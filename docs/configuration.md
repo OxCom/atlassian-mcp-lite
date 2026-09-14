@@ -121,8 +121,8 @@ destructive are off.
 | Variable | Default | Enables |
 |---|---|---|
 | `ATLAS_JIRA_READ` | `true` | `jira_search`, `jira_get` |
-| `ATLAS_JIRA_WRITE` | `false` | `jira_create`, `jira_comment`; `jira_update` for `fixVersion` only |
-| `ATLAS_JIRA_DESTRUCTIVE` | `false` | `jira_transition`; `jira_update` for assignee, epic, parent, summary and description |
+| `ATLAS_JIRA_WRITE` | `false` | `jira_create`, `jira_comment`, `jira_transition`; `jira_update` for `assignee` and `fixVersion` |
+| `ATLAS_JIRA_DESTRUCTIVE` | `false` | `jira_update` for parent, summary and description |
 | `ATLAS_CONFLUENCE_READ` | `true` | `confluence_search`, `confluence_get_page` |
 | `ATLAS_CONFLUENCE_WRITE` | `false` | `confluence_create_page`, `confluence_comment` |
 | `ATLAS_CONFLUENCE_DESTRUCTIVE` | `false` | `confluence_update_page` |
@@ -131,13 +131,19 @@ The three classes:
 
 - **read** returns data and changes nothing.
 - **write** is additive and reversible: add a comment, add a fix version,
-  create a page. `fixVersion` is the one `jira_update` field in this class,
-  because it uses Jira's `add` verb: the versions already on the issue survive
-  and the change is undone by removing one entry.
-- **destructive** overwrites or moves state that is hard to recover: assignee,
-  epic link, parent, summary, description, status transition, replacing a page
-  body. Assignee, epic and parent are here rather than under write because each
-  replaces a value the issue already holds and nothing records what it was.
+  create a page, assign an issue, move it to another status. `fixVersion` uses
+  Jira's `add` verb: the versions already on the issue survive and the change is
+  undone by removing one entry. `assignee` and `jira_transition` are here
+  because changing who owns an issue or what status it is in is an update, and
+  neither can clear anything: an empty `assignee` means "leave unchanged", so
+  this tool cannot unassign. A workflow transition can still be one-way and can
+  fire notifications and automation, so it is worth knowing what a status name
+  will do on your site before enabling write.
+- **destructive** overwrites or moves state that is hard to recover: parent,
+  summary, description, replacing a page body. The rule is that destructive
+  means closing, deleting or unassigning; changing a status or an assignee is an
+  update. Parent, summary and description are here because each replaces a value
+  the issue already holds and nothing records what it was.
 
 Booleans accept `1/true/yes/on` and `0/false/no/off`, case-insensitive. Any
 other value is a startup error: a typo such as `ture` must not quietly disable a
@@ -146,9 +152,9 @@ capability you believe is on, or enable one you believe is off.
 A tool is registered when at least one of its classes is enabled. A tool that is
 not registered does not exist: it is absent from `tools/list` and unknown to the
 dispatcher. `jira_update` builds its input schema from the enabled classes, so
-with destructive off the `assignee`, `epic`, `parent`, `summary` and
-`description` properties are not in the schema at all and write alone leaves
-only `key` and `fixVersion`. The handler re-checks the same rule, so a call
+with destructive off the `parent`, `summary` and `description` properties are
+not in the schema at all and write alone leaves only `key`, `assignee` and
+`fixVersion`. The handler re-checks the same rule, so a call
 that reached it another way is still refused. If every class of every product
 is off, the server exits with `no tools enabled`.
 
@@ -321,7 +327,7 @@ request and skipped entirely when no list is set:
   key an issue has ever had working after it moves, so `jira_update` asks which
   project the issue is in now and checks that too. An allowlisted old prefix
   would otherwise authorise a write into a project you never allowed.
-- **`epic` and `parent` must be in an allowlisted project as well**, by prefix
+- **A `parent` must be in an allowlisted project as well**, by prefix
   and by where that issue actually lives. Linking is not a change to one issue
   only: the target gains a child in its hierarchy, on its board and in its
   roll-ups, so a list naming `SANDBOX` must not let an update there reach into
@@ -364,27 +370,21 @@ Logs go to stderr; stdout carries the MCP protocol. The token and the Basic
 credential derived from it are redacted wherever they might appear. Successful
 response bodies are never logged; failing ones are at `debug`.
 
-### Field ids
+### The removed epic setting
 
-| Variable | Default | Rules |
-|---|---|---|
-| `ATLAS_EPIC_FIELD_ID` | `customfield_10014` | The id of the Epic Link custom field on your site. A field id such as `customfield_10014`. |
+Earlier versions had an `ATLAS_EPIC_FIELD_ID` setting and a logical field name
+`epic`, which stood for the site's Epic Link custom field. Both are gone.
+Atlassian removed `Epic Link` from the Jira Cloud REST API on 13 September 2025,
+and `Parent Link` on 13 June 2025; the native `parent` field replaced them and
+sets the epic link in team-managed and company-managed Cloud projects alike.
+Setting `ATLAS_EPIC_FIELD_ID` now does nothing, and `epic` is not accepted in a
+`fields` list or as a `jira_update` property. Use `parent`: the parent of a
+story is its epic, the parent of a sub-task is its story.
 
-Jira has no field named `epic`: company-managed projects store the link in a
-custom field whose id differs between sites. The tools accept the logical name
-`epic` in `fields` and in `jira_update`, and translate it to this id.
-
-**How to find your Epic Link field id.**
-
-1. Open `https://your-domain.atlassian.net/rest/api/3/field` in a browser
-   while signed in. It returns every field as JSON.
-2. Search the page for `"name":"Epic Link"` and read the `id` next to it.
-3. If there is no such field, your projects are team-managed and use `parent`
-   instead of an epic link; leave the default.
-
-Alternatively, in Jira: ⚙ *Settings* → *Issues* → *Custom fields*, find *Epic
-Link*, open its ⋯ menu → *View field information*; the id is the number at the
-end of the URL, prefixed with `customfield_`.
+On a site that still holds a populated legacy Epic Link custom field, the stored
+value can be read by naming the custom field id explicitly in a `fields` list,
+or with `*all`, where it appears under its raw `customfield_XXXXX` name with no
+friendly alias. There is no write path to it.
 
 ### Trust store
 

@@ -217,8 +217,8 @@ off, the server refuses to start rather than serving an empty tool list.
 | `jira_create` | write | Create an issue in a project |
 | `jira_search` | read | JQL search, compact default field set |
 | `jira_get` | read | One issue, description as markdown |
-| `jira_update` | write + destructive | Adds a fix version with write; replaces assignee, epic, parent, summary or description only when destructive is enabled |
-| `jira_transition` | destructive | Move an issue to another status by name |
+| `jira_update` | write + destructive | Sets the assignee and adds a fix version with write; replaces parent, summary or description only when destructive is enabled |
+| `jira_transition` | write | Move an issue to another status by name |
 | `jira_comment` | write | Add a comment |
 | `confluence_search` | read | CQL search |
 | `confluence_get_page` | read | One page, body as markdown |
@@ -230,11 +230,10 @@ The three classes mean:
 
 - **read** — returns data, changes nothing.
 - **write** — additive and reversible: add a comment, add a fix version, create
-  a page.
-- **destructive** — overwrites or moves state that is hard to recover: assignee,
-  epic link, parent, summary, description, status transition, page body
-  replacement. Each of these replaces a value the issue already holds, and
-  nothing records what that value was.
+  a page, assign an issue, move it to another status.
+- **destructive** — overwrites or moves state that is hard to recover: parent,
+  summary, description, page body replacement. Each of these replaces a value
+  the issue already holds, and nothing records what that value was.
 
 Tools speak markdown. Atlassian does not accept markdown over REST, so the
 server converts markdown to wiki markup on the way in, and wiki markup or
@@ -266,9 +265,9 @@ Ask for more with the `fields` parameter:
 | `["-updated"]` | the default minus that |
 | `["*all"]` | **every field Jira has** for the issue |
 
-Bare and prefixed forms may not be mixed in one call. `epic` is a logical name
-for the site's Epic Link custom field, see `ATLAS_EPIC_FIELD_ID`. The Confluence
-page tool has a fixed field vocabulary and no `*all`. Where to find the name of
+Bare and prefixed forms may not be mixed in one call. The parent of a story is
+its epic and the parent of a sub-task is its story, so `parent` covers both. The
+Confluence page tool has a fixed field vocabulary and no `*all`. Where to find the name of
 a field is covered in [`docs/configuration.md`](docs/configuration.md).
 
 ## Restricting which projects and spaces are visible and changeable
@@ -306,7 +305,7 @@ A non-empty list is strict: a write or destructive call aimed anywhere else is
 refused before any request is made, and a move into or out of a listed
 project or space is refused too. The check follows the issue rather than the
 key: because Jira keeps every old key working after an issue moves, the
-project the issue is in *now* is what is checked. An `epic` or `parent` key
+project the issue is in *now* is what is checked. A `parent` key
 passed to `jira_update` must be in an allowed project too, since linking gives
 that issue a child in its own hierarchy. For the same reason
 `confluence_create_page` refuses a `parent_id` whose page is in a different
@@ -348,7 +347,6 @@ The short version:
 | `ATLAS_WRITE_PROJECTS` / `ATLAS_WRITE_SPACES` | unrestricted | Write allowlists |
 | `ATLAS_LIMIT_DEFAULT` / `ATLAS_LIMIT_MAX` | `20` / `50` | Result counts |
 | `ATLAS_LOG` | `info` | `info` or `debug` |
-| `ATLAS_EPIC_FIELD_ID` | `customfield_10014` | Epic Link field id |
 
 Every variable, its validation rules, and step-by-step instructions for finding
 each value — creating an API token, locating a custom field id, reading a space

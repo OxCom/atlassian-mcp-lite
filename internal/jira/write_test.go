@@ -405,9 +405,8 @@ func TestWriteHandlersRecheckCapabilities(t *testing.T) {
 		t.Error("jira_comment must be refused when write is disabled")
 	}
 
-	base.cfg.Domains = map[string]core.Caps{Domain: {Read: true, Write: true}}
 	if err := callErr(t, base, "jira_transition", map[string]any{"key": "PROJ-1", "status": "Done"}); err == nil {
-		t.Error("jira_transition must be refused when destructive is disabled")
+		t.Error("jira_transition must be refused when write is disabled")
 	}
 }
 
@@ -495,7 +494,7 @@ func TestTransitionErrorsHideNamesWithoutRead(t *testing.T) {
 	base := newTestModule(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"transitions":[{"id":"51","name":"Done","to":{"name":"Closed"}},{"id":"52","name":"Finish","to":{"name":"Done"}}]}`)
 	}).(module)
-	base.cfg.Domains = map[string]core.Caps{Domain: {Destructive: true}}
+	base.cfg.Domains = map[string]core.Caps{Domain: {Write: true}}
 
 	err := callErr(t, base, "jira_transition", map[string]any{"key": "PROJ-1", "status": "Nope"})
 	for _, leak := range []string{"Closed", "Finish"} {

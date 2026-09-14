@@ -15,22 +15,32 @@ import (
 func TestUpdateSchemaOmitsDestructivePropsWhenDisabled(t *testing.T) {
 	d := declFor(t, newTestModule(t, func(http.ResponseWriter, *http.Request) {}), "jira_update")
 
-	// Everything that replaces an existing value is destructive: summary and
-	// description, but also assignee, epic and parent, which are SETs.
+	// Only what overwrites content the issue already holds is destructive:
+	// parent, summary and description. fixVersion is additive and assignee is
+	// recoverable from the issue history, so both are write.
 	off := d.Schema(core.Caps{Write: true})
-	for _, prop := range []string{"summary", "description", "assignee", "epic", "parent"} {
+	for _, prop := range []string{"summary", "description", "parent"} {
 		if _, ok := off.Properties[prop]; ok {
 			t.Errorf("%q must be absent when destructive=false", prop)
 		}
 	}
-	if _, ok := off.Properties["fixVersion"]; !ok {
-		t.Error("fixVersion must be present when write=true")
+	for _, prop := range []string{"fixVersion", "assignee"} {
+		if _, ok := off.Properties[prop]; !ok {
+			t.Errorf("%q must be present when write=true", prop)
+		}
 	}
 
 	on := d.Schema(core.Caps{Write: true, Destructive: true})
-	for _, prop := range []string{"summary", "description", "assignee", "epic", "parent"} {
+	for _, prop := range []string{"summary", "description", "parent"} {
 		if _, ok := on.Properties[prop]; !ok {
 			t.Errorf("%q must be present when destructive=true", prop)
+		}
+	}
+	// The Epic Link field left the Jira Cloud REST API on 2025-09-13; parent
+	// sets the epic link now, so there is no epic property in any combination.
+	for _, c := range []core.Caps{{Write: true}, {Destructive: true}, {Write: true, Destructive: true}} {
+		if _, ok := d.Schema(c).Properties["epic"]; ok {
+			t.Errorf("caps %+v: epic must never be offered", c)
 		}
 	}
 }
@@ -247,20 +257,6 @@ func TestUpdateUnresolvableAssigneeWritesNothing(t *testing.T) {
 	}
 }
 
-func TestUpdateEpicUsesConfiguredCustomField(t *testing.T) {
-	var body map[string]any
-	m := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		w.WriteHeader(http.StatusNoContent)
-	})
-	call(t, m, "jira_update", map[string]any{"key": "PROJ-1", "epic": "PROJ-9"})
-
-	fields, _ := body["fields"].(map[string]any)
-	if fields["customfield_10014"] != "PROJ-9" {
-		t.Errorf("epic must map to the configured custom field, got %v", fields)
-	}
-}
-
 func TestUpdateParentUsesParentField(t *testing.T) {
 	var body map[string]any
 	m := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
@@ -386,7 +382,6 @@ func TestUpdateRejectsMalformedKeys(t *testing.T) {
 	})
 	for name, args := range map[string]map[string]any{
 		"issue":  {"key": "../../secret", "summary": "x"},
-		"epic":   {"key": "PROJ-1", "epic": "not a key"},
 		"parent": {"key": "PROJ-1", "parent": "PROJ-1/../x"},
 	} {
 		if err := callUpdateErr(t, m, args); err == nil {
@@ -453,13 +448,13 @@ func TestUpdateReportsWhatItSet(t *testing.T) {
 func TestUpdateUpstreamFailurePropagates(t *testing.T) {
 	m := newTestModule(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, `{"errorMessages":["Field 'customfield_10014' cannot be set"]}`)
+		_, _ = io.WriteString(w, `{"errorMessages":["Field 'parent' cannot be set"]}`)
 	})
-	err := callUpdateErr(t, m, map[string]any{"key": "PROJ-1", "epic": "PROJ-9"})
+	err := callUpdateErr(t, m, map[string]any{"key": "PROJ-1", "parent": "PROJ-9"})
 	if err == nil {
 		t.Fatal("a 400 must reach the caller")
 	}
-	if !strings.Contains(err.Error(), "customfield_10014") {
+	if !strings.Contains(err.Error(), "cannot be set") {
 		t.Errorf("upstream diagnostics must survive verbatim, got %q", err)
 	}
 }
@@ -482,16 +477,17 @@ func callUpdateErr(t *testing.T, m core.Module, args map[string]any) error {
 	return err
 }
 
-// assignee, epic and parent are SET operations: each replaces whatever value
+// parent, summary and description are SET operations that overwrite content
 // the issue already holds, which is exactly what the destructive class exists
-// to gate. Only fixVersion is additive, so it alone stays under write.
+// to gate. fixVersion is additive and assignee is recoverable from the issue
+// history, so those two stay under write.
 func TestUpdateSetFieldsRequireDestructive(t *testing.T) {
 	base := newTestModule(t, func(http.ResponseWriter, *http.Request) {
 		t.Error("no request should be made for a field the capability forbids")
 	}).(module)
 	base.cfg.Domains = map[string]core.Caps{Domain: {Read: true, Write: true}}
 
-	for field, value := range map[string]string{"assignee": "u@example.com", "epic": "PROJ-9", "parent": "PROJ-2"} {
+	for field, value := range map[string]string{"parent": "PROJ-2", "summary": "s", "description": "d"} {
 		err := callUpdateErr(t, base, map[string]any{"key": "PROJ-1", field: value})
 		if err == nil {
 			t.Errorf("%s must be refused when destructive is disabled", field)
@@ -503,14 +499,18 @@ func TestUpdateSetFieldsRequireDestructive(t *testing.T) {
 	}
 }
 
-func TestUpdateFixVersionNeedsOnlyWrite(t *testing.T) {
-	var put bool
+// fixVersion is additive and assignee is recoverable from the issue history,
+// so neither may be gated on destructive.
+func TestUpdateWriteClassFieldsNeedOnlyWrite(t *testing.T) {
+	var puts int
 	base := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/rest/api/3/project/PROJ/versions":
 			_, _ = io.WriteString(w, `[{"id":"777","name":"1.2.x"}]`)
+		case r.URL.Path == "/rest/api/3/user/search":
+			_, _ = io.WriteString(w, `[{"accountId":"aid-9","displayName":"A User"}]`)
 		case r.Method == http.MethodPut:
-			put = true
+			puts++
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -518,107 +518,103 @@ func TestUpdateFixVersionNeedsOnlyWrite(t *testing.T) {
 	}).(module)
 	base.cfg.Domains = map[string]core.Caps{Domain: {Read: true, Write: true}}
 
-	if err := callUpdateErr(t, base, map[string]any{"key": "PROJ-1", "fixVersion": "1.2.x"}); err != nil {
-		t.Fatalf("fixVersion is additive and must work with write alone: %v", err)
+	for field, value := range map[string]string{"fixVersion": "1.2.x", "assignee": "u@example.com"} {
+		if err := callUpdateErr(t, base, map[string]any{"key": "PROJ-1", field: value}); err != nil {
+			t.Errorf("%s must work with write alone: %v", field, err)
+		}
 	}
-	if !put {
-		t.Error("the update was never sent")
+	if puts != 2 {
+		t.Errorf("sent %d updates, want one per write-class field", puts)
 	}
 }
 
-// Linking an issue to an epic or parent writes into that other issue's
-// hierarchy too, so the link target is held to the same allowlist as the
-// issue being updated: prefix check first, then where the issue really lives.
+// Linking an issue to a parent writes into that other issue's hierarchy too,
+// so the link target is held to the same allowlist as the issue being updated:
+// prefix check first, then where the issue really lives.
 func TestUpdateLinkTargetsOutsideAllowlistAreRefused(t *testing.T) {
-	for _, field := range []string{"parent", "epic"} {
-		var (
-			mu   sync.Mutex
-			seen = map[string]int{}
-		)
-		base := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			seen[r.Method+" "+r.URL.Path]++
-			mu.Unlock()
-			if r.Method == http.MethodGet {
-				_, _ = io.WriteString(w, `{"fields":{"project":{"key":"SANDBOX"}}}`)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-		}).(module)
-		base.cfg.WriteProjects = []string{"SANDBOX"}
-
-		err := callUpdateErr(t, base, map[string]any{"key": "SANDBOX-1", field: "PROD-7"})
-		if err == nil {
-			t.Errorf("%s outside the allowlist must be refused", field)
-			continue
-		}
-		for _, want := range []string{field, `"PROD-7"`, "PROD"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("%s: error = %v, want it to mention %q", field, err, want)
-			}
-		}
-
+	var (
+		mu   sync.Mutex
+		seen = map[string]int{}
+	)
+	base := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		counts := make(map[string]int, len(seen))
-		for k, v := range seen {
-			counts[k] = v
-		}
+		seen[r.Method+" "+r.URL.Path]++
 		mu.Unlock()
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `{"fields":{"project":{"key":"SANDBOX"}}}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}).(module)
+	base.cfg.WriteProjects = []string{"SANDBOX"}
 
-		// The counter must have seen something, or every zero below would pass
-		// on a fake that records nothing.
-		if counts[http.MethodGet+" /rest/api/2/issue/SANDBOX-1"] == 0 {
-			t.Errorf("%s: the issue being updated was never looked up, so the request counts prove nothing: %v", field, counts)
+	err := callUpdateErr(t, base, map[string]any{"key": "SANDBOX-1", "parent": "PROD-7"})
+	if err == nil {
+		t.Fatal("parent outside the allowlist must be refused")
+	}
+	for _, want := range []string{"parent", `"PROD-7"`, "PROD"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
 		}
+	}
 
-		// Counted by path, not merely "no PUT was sent": the prefix check is
-		// meant to settle the refusal on its own, so the refused key must never
-		// be probed either. A GET against it would tell the caller whether
-		// PROD-7 exists, which is exactly the information an allowlist outside
-		// SANDBOX is there to withhold.
-		for path, n := range counts {
-			if strings.Contains(path, "PROD-7") {
-				t.Errorf("%s: %s was requested %d times; a refused project must never be probed", field, path, n)
-			}
+	mu.Lock()
+	counts := make(map[string]int, len(seen))
+	for k, v := range seen {
+		counts[k] = v
+	}
+	mu.Unlock()
+
+	// The counter must have seen something, or every zero below would pass
+	// on a fake that records nothing.
+	if counts[http.MethodGet+" /rest/api/2/issue/SANDBOX-1"] == 0 {
+		t.Errorf("the issue being updated was never looked up, so the request counts prove nothing: %v", counts)
+	}
+
+	// Counted by path, not merely "no PUT was sent": the prefix check is
+	// meant to settle the refusal on its own, so the refused key must never
+	// be probed either. A GET against it would tell the caller whether
+	// PROD-7 exists, which is exactly the information an allowlist outside
+	// SANDBOX is there to withhold.
+	for path, n := range counts {
+		if strings.Contains(path, "PROD-7") {
+			t.Errorf("%s was requested %d times; a refused project must never be probed", path, n)
 		}
-		if n := counts[http.MethodPut+" /rest/api/2/issue/SANDBOX-1"]; n != 0 {
-			t.Errorf("%s: nothing may be written once the allowlist check fails, got %d PUTs", field, n)
-		}
+	}
+	if n := counts[http.MethodPut+" /rest/api/2/issue/SANDBOX-1"]; n != 0 {
+		t.Errorf("nothing may be written once the allowlist check fails, got %d PUTs", n)
 	}
 }
 
 // The link target's prefix is no more proof of its project than the target
 // issue's is: a key that once belonged to SANDBOX may now resolve to PROD.
 func TestUpdateLinkTargetMovedOutOfAllowlistIsRefused(t *testing.T) {
-	for _, field := range []string{"parent", "epic"} {
-		var put bool
-		base := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodGet {
-				if strings.HasSuffix(r.URL.Path, "/SANDBOX-9") {
-					_, _ = io.WriteString(w, `{"fields":{"project":{"key":"PROD"}}}`)
-					return
-				}
-				_, _ = io.WriteString(w, `{"fields":{"project":{"key":"SANDBOX"}}}`)
+	var put bool
+	base := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			if strings.HasSuffix(r.URL.Path, "/SANDBOX-9") {
+				_, _ = io.WriteString(w, `{"fields":{"project":{"key":"PROD"}}}`)
 				return
 			}
-			put = true
-			w.WriteHeader(http.StatusNoContent)
-		}).(module)
-		base.cfg.WriteProjects = []string{"SANDBOX"}
+			_, _ = io.WriteString(w, `{"fields":{"project":{"key":"SANDBOX"}}}`)
+			return
+		}
+		put = true
+		w.WriteHeader(http.StatusNoContent)
+	}).(module)
+	base.cfg.WriteProjects = []string{"SANDBOX"}
 
-		err := callUpdateErr(t, base, map[string]any{"key": "SANDBOX-1", field: "SANDBOX-9"})
-		if err == nil {
-			t.Errorf("%s: a link target that moved out of the allowlist must be refused", field)
-			continue
-		}
-		// The project key is Jira-supplied, so it is quoted like every other
-		// third-party string in this package.
-		if !strings.Contains(err.Error(), `"PROD"`) || !strings.Contains(err.Error(), field) {
-			t.Errorf("%s: error = %v, want it to name the field and quote the project the issue lives in", field, err)
-		}
-		if put {
-			t.Errorf("%s: nothing may be written once the allowlist check fails", field)
-		}
+	err := callUpdateErr(t, base, map[string]any{"key": "SANDBOX-1", "parent": "SANDBOX-9"})
+	if err == nil {
+		t.Fatal("a link target that moved out of the allowlist must be refused")
+	}
+	// The project key is Jira-supplied, so it is quoted like every other
+	// third-party string in this package.
+	if !strings.Contains(err.Error(), `"PROD"`) || !strings.Contains(err.Error(), "parent") {
+		t.Errorf("error = %v, want it to name the field and quote the project the issue lives in", err)
+	}
+	if put {
+		t.Error("nothing may be written once the allowlist check fails")
 	}
 }
 
@@ -633,7 +629,7 @@ func TestUpdateLinkTargetSkipsVerificationWhenUnrestricted(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}).(module)
 	base.cfg.WriteProjects = nil
-	if err := callUpdateErr(t, base, map[string]any{"key": "PROJ-1", "parent": "OTHER-2", "epic": "THIRD-3"}); err != nil {
+	if err := callUpdateErr(t, base, map[string]any{"key": "PROJ-1", "parent": "OTHER-2"}); err != nil {
 		t.Fatalf("jira_update: %v", err)
 	}
 	if gets != 0 {

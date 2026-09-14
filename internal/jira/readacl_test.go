@@ -26,7 +26,6 @@ func newReadRestrictedModule(t *testing.T, h http.HandlerFunc, readProjects ...s
 		ReadProjects: readProjects,
 		LimitDefault: 20,
 		LimitMax:     50,
-		EpicFieldID:  "customfield_10014",
 	}
 	var logs bytes.Buffer
 	return NewWith(cfg, core.NewClient(cfg, core.NewLogger("debug", &logs)))

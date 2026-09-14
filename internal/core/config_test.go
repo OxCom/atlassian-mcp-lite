@@ -144,33 +144,6 @@ func TestLoadRejectsMalformedToken(t *testing.T) {
 	}
 }
 
-func TestLoadValidatesEpicFieldID(t *testing.T) {
-	load := func(v string) (Config, error) {
-		return Load(env(map[string]string{
-			"ATLAS_BASE_URL":      "https://x.atlassian.net",
-			"ATLAS_EMAIL":         "a@b.c",
-			"ATLAS_TOKEN":         fixtureToken,
-			"ATLAS_EPIC_FIELD_ID": v,
-		}), []string{"jira"})
-	}
-	cfg, err := load("customfield_12345")
-	if err != nil || cfg.EpicFieldID != "customfield_12345" {
-		t.Errorf("override = %q, %v", cfg.EpicFieldID, err)
-	}
-	for _, raw := range []string{"custom field", "customfield-1", "../x", "cf?a=b", "10014", ""} {
-		if raw == "" {
-			// Empty falls back to the default rather than failing.
-			if cfg, err := load(raw); err != nil || cfg.EpicFieldID != "customfield_10014" {
-				t.Errorf("empty must default: %q, %v", cfg.EpicFieldID, err)
-			}
-			continue
-		}
-		if _, err := load(raw); err == nil {
-			t.Errorf("ATLAS_EPIC_FIELD_ID=%q must be rejected", raw)
-		}
-	}
-}
-
 func TestLoadValidatesAllowlistKeys(t *testing.T) {
 	for _, name := range []string{"ATLAS_WRITE_PROJECTS", "ATLAS_WRITE_SPACES"} {
 		for _, raw := range []string{"PROJ/../OTHER", "PROJ KEY", "PROJ*", `PROJ" OR 1=1`, "PR%20OJ", "..", "PROJ,../x"} {
@@ -467,9 +440,6 @@ func TestLimitDefaults(t *testing.T) {
 	}), []string{"jira"})
 	if cfg.LimitDefault != 20 || cfg.LimitMax != 50 {
 		t.Errorf("limits = %d/%d, want 20/50", cfg.LimitDefault, cfg.LimitMax)
-	}
-	if cfg.EpicFieldID != "customfield_10014" {
-		t.Errorf("EpicFieldID = %q, want customfield_10014", cfg.EpicFieldID)
 	}
 }
 

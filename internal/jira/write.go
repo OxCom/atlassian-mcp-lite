@@ -91,11 +91,11 @@ func (m module) handleComment(ctx context.Context, raw json.RawMessage) (any, er
 func (m module) transitionDecl() core.ToolDecl {
 	return core.ToolDecl{
 		Name: "jira_transition",
-		// Destructive, not write: a workflow move is not trivially reversible.
-		// A transition can be one-way, and it fires notifications, automation
-		// rules and post-functions that no later transition undoes.
-		Actions: []core.Action{core.ActionDestructive},
-		Description: "Move a Jira issue to another status. Destructive: a workflow move can be " +
+		// Write, not destructive: a workflow move changes an issue's status,
+		// which is an update. It overwrites no content and destroys nothing —
+		// destructive is for closing, deleting and unassigning.
+		Actions: []core.Action{core.ActionWrite},
+		Description: "Move a Jira issue to another status. Note a workflow move can be " +
 			"one-way and can trigger notifications and automation." + descNotAuthorized,
 		Schema: func(core.Caps) *jsonschema.Schema {
 			return core.ObjectSchema(map[string]*jsonschema.Schema{
@@ -128,8 +128,8 @@ func (m module) handleTransition(ctx context.Context, raw json.RawMessage) (any,
 	if err != nil {
 		return nil, fmt.Errorf("jira_transition: %w", err)
 	}
-	if !m.cfg.Domains[Domain].Destructive {
-		return nil, fmt.Errorf("jira_transition: a workflow move requires the destructive capability for %s", Domain)
+	if !m.cfg.Domains[Domain].Write {
+		return nil, fmt.Errorf("jira_transition: a workflow move requires the write capability for %s", Domain)
 	}
 	if err := core.BoundBytes(fieldStatus, in.Status, maxNameLen); err != nil {
 		return nil, fmt.Errorf("jira_transition: %w", err)

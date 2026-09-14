@@ -30,8 +30,6 @@ var (
 	// so a value that could never name a project fails at startup rather than
 	// silently denying every read.
 	projectKeyRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
-	// A Jira field id is a JSON object key and a query-string value.
-	fieldIDRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
 )
 
 // minTokenRunes is the shortest ATLAS_TOKEN accepted. Atlassian API tokens are
@@ -81,10 +79,6 @@ type Config struct {
 	LogLevel     string
 	LimitDefault int
 	LimitMax     int
-
-	// EpicFieldID is site-specific: the Epic Link custom field id differs
-	// between Jira sites, so it is configurable rather than a constant.
-	EpicFieldID string
 }
 
 // Load resolves configuration for the given domains. Capability env vars are
@@ -92,12 +86,11 @@ type Config struct {
 // here.
 func Load(getenv func(string) string, domains []string) (Config, error) {
 	cfg := Config{
-		BaseURL:     strings.TrimRight(strings.TrimSpace(getenv("ATLAS_BASE_URL")), "/"),
-		Email:       strings.TrimSpace(getenv("ATLAS_EMAIL")),
-		Token:       strings.TrimSpace(getenv("ATLAS_TOKEN")),
-		Domains:     make(map[string]Caps, len(domains)),
-		LogLevel:    strings.ToLower(orDefault(getenv("ATLAS_LOG"), "info")),
-		EpicFieldID: orDefault(getenv("ATLAS_EPIC_FIELD_ID"), "customfield_10014"),
+		BaseURL:  strings.TrimRight(strings.TrimSpace(getenv("ATLAS_BASE_URL")), "/"),
+		Email:    strings.TrimSpace(getenv("ATLAS_EMAIL")),
+		Token:    strings.TrimSpace(getenv("ATLAS_TOKEN")),
+		Domains:  make(map[string]Caps, len(domains)),
+		LogLevel: strings.ToLower(orDefault(getenv("ATLAS_LOG"), "info")),
 	}
 
 	for _, required := range []struct {
@@ -130,10 +123,6 @@ func Load(getenv func(string) string, domains []string) (Config, error) {
 	case "info", "debug":
 	default:
 		return Config{}, fmt.Errorf("ATLAS_LOG: %q is not a known level; use info or debug", cfg.LogLevel)
-	}
-
-	if !fieldIDRe.MatchString(cfg.EpicFieldID) {
-		return Config{}, fmt.Errorf("ATLAS_EPIC_FIELD_ID: %q is not a valid field id; expected a name such as customfield_10014", cfg.EpicFieldID)
 	}
 
 	// Read once, before the domain loop, and applied to every domain's Caps.

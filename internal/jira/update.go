@@ -26,8 +26,9 @@ const (
 func (m module) updateDecl() core.ToolDecl {
 	return core.ToolDecl{
 		Name: "jira_update",
-		// Spans two classes: fixVersion is the one additive field and is write;
-		// everything else replaces a value the issue already holds and is
+		// Spans two classes: fixVersion and assignee are write, because neither
+		// destroys anything a later call cannot put back; parent, summary and
+		// description replace a value the issue already holds and are
 		// destructive. Declaring both means the tool still registers when only
 		// one class is enabled, carrying just that class's properties.
 		Actions: []core.Action{core.ActionWrite, core.ActionDestructive},
@@ -42,23 +43,24 @@ func (m module) updateDecl() core.ToolDecl {
 			props := map[string]*jsonschema.Schema{
 				fieldKey: {Type: typeString, Description: descIssueKey},
 			}
-			// Additive, reversible: fixVersion uses Jira's `add` verb, so the
-			// versions already on the issue survive and the change can be undone
-			// by removing one entry.
+			// Additive, or a replacement that is trivially undone: fixVersion
+			// uses Jira's `add` verb, so the versions already on the issue
+			// survive and the change can be undone by removing one entry.
+			// assignee does replace a value, but the previous assignee is
+			// recoverable from the issue history and re-assigning puts it back,
+			// so it is a write rather than a destructive overwrite.
 			if c.Write {
 				props["fixVersion"] = &jsonschema.Schema{Type: typeString,
 					Description: "Fix version name, resolved to its id and ADDED to the issue's existing versions."}
-			}
-			// Overwrites that are hard to recover. assignee, epic and parent
-			// are SETs too: each replaces the previous value, and nothing here
-			// records what that value was.
-			if c.Destructive {
 				props["assignee"] = &jsonschema.Schema{Type: typeString,
 					Description: "Assignee email address, or an exact display name. Replaces the current assignee."}
-				props["epic"] = &jsonschema.Schema{Type: typeString,
-					Description: "Epic issue key to link this issue to, replacing any current epic link. Company-managed projects only; team-managed projects use parent."}
+			}
+			// Overwrites that are hard to recover. parent, summary and
+			// description are SETs: each replaces the previous value, and nothing
+			// here records what that value was.
+			if c.Destructive {
 				props["parent"] = &jsonschema.Schema{Type: typeString,
-					Description: "Parent issue key. Replaces the current parent."}
+					Description: "Parent issue key. For a story this is its epic; for a sub-task it is the parent story. Replaces the current parent."}
 				props["summary"] = &jsonschema.Schema{Type: typeString,
 					Description: "Replaces the summary."}
 				props["description"] = &jsonschema.Schema{Type: typeString,
@@ -74,7 +76,6 @@ type updateArgs struct {
 	Key         string `json:"key"`
 	Assignee    string `json:"assignee"`
 	FixVersion  string `json:"fixVersion"`
-	Epic        string `json:"epic"`
 	Parent      string `json:"parent"`
 	Summary     string `json:"summary"`
 	Description string `json:"description"`
@@ -97,11 +98,11 @@ func (m module) handleUpdate(ctx context.Context, raw json.RawMessage) (any, err
 	// validates against it, but the handler is where the write actually
 	// happens, so it re-checks rather than trusting its caller.
 	caps := m.cfg.Domains[Domain]
-	if !caps.Write && in.FixVersion != "" {
-		return nil, fmt.Errorf("jira_update: fixVersion requires the write capability for %s", Domain)
+	if !caps.Write && (in.FixVersion != "" || in.Assignee != "") {
+		return nil, fmt.Errorf("jira_update: fixVersion and assignee require the write capability for %s", Domain)
 	}
-	if !caps.Destructive && (in.Assignee != "" || in.Epic != "" || in.Parent != "" || in.Summary != "" || in.Description != "") {
-		return nil, fmt.Errorf("jira_update: assignee, epic, parent, summary and description replace existing values and require the destructive capability for %s", Domain)
+	if !caps.Destructive && (in.Parent != "" || in.Summary != "" || in.Description != "") {
+		return nil, fmt.Errorf("jira_update: parent, summary and description replace existing values and require the destructive capability for %s", Domain)
 	}
 
 	// Jira's own summary limit is 255 characters, not bytes, so an accented or
@@ -121,7 +122,7 @@ func (m module) handleUpdate(ctx context.Context, raw json.RawMessage) (any, err
 
 	// Nothing to do is caught before any lookup: an update with no fields must
 	// not cost a user search.
-	if in.Assignee == "" && in.FixVersion == "" && in.Epic == "" &&
+	if in.Assignee == "" && in.FixVersion == "" &&
 		in.Parent == "" && in.Summary == "" && in.Description == "" {
 		return nil, fmt.Errorf("jira_update: nothing to set; supply at least one field. " +
 			"An empty string means \"leave unchanged\", so this tool cannot clear a field")
@@ -155,7 +156,7 @@ func (m module) handleUpdate(ctx context.Context, raw json.RawMessage) (any, err
 	// update carries the verbs Jira offers for multi-value fields. A value
 	// placed in `fields` is a SET and replaces the whole array.
 	update := map[string]any{}
-	applied := make([]string, 0, 6)
+	applied := make([]string, 0, 5)
 
 	if in.Assignee != "" {
 		id, err := m.accountIDFor(ctx, in.Assignee)
@@ -176,22 +177,6 @@ func (m module) handleUpdate(ctx context.Context, raw json.RawMessage) (any, err
 		// write capability, whose contract is "additive and reversible".
 		update["fixVersions"] = []any{map[string]any{"add": map[string]any{"id": id}}}
 		applied = append(applied, "fixVersion")
-	}
-	if in.Epic != "" {
-		epic, err := validKey(in.Epic)
-		if err != nil {
-			return nil, fmt.Errorf("jira_update: epic: %w", err)
-		}
-		if err := m.authorizeLinkTarget(ctx, logicalEpic, epic); err != nil {
-			return nil, fmt.Errorf("jira_update: %w", err)
-		}
-		// Classic projects use an Epic Link custom field whose id is
-		// site-specific; team-managed projects use parent. The id comes from
-		// configuration so it is never a shared hardcoded constant. A
-		// team-managed project answers with a 400 naming the field, which the
-		// error path surfaces verbatim.
-		fields[m.cfg.EpicFieldID] = epic
-		applied = append(applied, logicalEpic)
 	}
 	if in.Parent != "" {
 		parent, err := validKey(in.Parent)
@@ -259,7 +244,7 @@ func (m module) currentProjectOf(ctx context.Context, key string) (string, error
 	return res.Fields.Project.Key, nil
 }
 
-// authorizeLinkTarget holds an epic or parent key to the same allowlist as the
+// authorizeLinkTarget holds a parent key to the same allowlist as the
 // issue being updated. Linking is not a write to one issue only: the target
 // gains a child in its hierarchy, on its board and in its roll-ups, so an
 // allowlist that names SANDBOX must not let an update there reach into PROD by

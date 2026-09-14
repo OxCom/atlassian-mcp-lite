@@ -24,26 +24,6 @@ var searchDefaults = []string{
 	"summary", fieldStatus, "updated", "assignee", "reporter",
 }
 
-// logicalEpic is the name callers use for the Epic Link field. Jira has no
-// field called epic — classic projects store the link in a site-specific custom
-// field — so every field list is translated before the request and translated
-// back in the response.
-
-const logicalEpic = "epic"
-
-// toUpstreamFields translates logical field names to what Jira expects.
-func (m module) toUpstreamFields(fields []string) []string {
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		if strings.EqualFold(f, logicalEpic) {
-			out = append(out, m.cfg.EpicFieldID)
-			continue
-		}
-		out = append(out, f)
-	}
-	return out
-}
-
 // getDefaults adds the description, which is normally wanted for a single issue.
 var getDefaults = append(append([]string{}, searchDefaults...), "description")
 
@@ -118,7 +98,7 @@ func (m module) handleSearch(ctx context.Context, raw json.RawMessage) (any, err
 	// list of keys. Every returned issue is therefore re-checked against the
 	// project it reports, exactly as jira_get checks the one it fetched, so the
 	// clause narrows the query and the check decides what may be shown.
-	upstream := m.toUpstreamFields(fields)
+	upstream := fields
 	injectedProject := false
 	if m.cfg.RestrictsReadProjects() && !fieldsInclude(fields, fieldProject) {
 		upstream = append(upstream, fieldProject)
@@ -244,7 +224,7 @@ func (m module) handleGet(ctx context.Context, raw json.RawMessage) (any, error)
 	// leave a window in which an issue moves from a permitted project into a
 	// forbidden one between them and is served anyway. One response cannot
 	// disagree with itself.
-	upstream := m.toUpstreamFields(fields)
+	upstream := fields
 	injectedProject := false
 	if m.cfg.RestrictsReadProjects() && !fieldsInclude(fields, fieldProject) {
 		upstream = append(upstream, fieldProject)
@@ -327,11 +307,6 @@ func (m module) flatten(key string, fields map[string]json.RawMessage, wiki bool
 	// *different* issue is reduced to its key; see scrubLinkedIssues.
 	restricted := m.cfg.RestrictsReadProjects()
 	for name, raw := range fields {
-		// The rename happens first so every later decision, including the null
-		// case, keys the value by the name the caller actually asked for.
-		if name == m.cfg.EpicFieldID {
-			name = logicalEpic
-		}
 		if len(raw) == 0 || string(raw) == "null" {
 			out[name] = nil
 			continue

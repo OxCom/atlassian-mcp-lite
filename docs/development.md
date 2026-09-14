@@ -52,10 +52,12 @@ Four packages plus `cmd/atlassian-mcp-lite`:
 Tools are declared, not registered. `core.Registry.Enabled` drops any tool whose
 action classes are all disabled for its domain, so a disabled tool does not
 exist at runtime. `jira_update` spans write and destructive and builds its input
-schema from the enabled capabilities: `fixVersion` is the only write-class
-property, because it uses Jira's `add` verb, while `assignee`, `epic`,
-`parent`, `summary` and `description` each replace an existing value and are
-destructive.
+schema from the enabled capabilities: `fixVersion` and `assignee` are the
+write-class properties — `fixVersion` uses Jira's `add` verb, and `assignee`
+cannot unassign, since an empty value means "leave unchanged" — while `parent`,
+`summary` and `description` each replace an existing value and are destructive.
+`jira_transition` is write for the same reason: moving an issue by status is an
+update.
 
 `core.NewServer` wraps every successful result as
 `{"notice": core.UntrustedNotice, "untrusted_content": ..., "notice_end":

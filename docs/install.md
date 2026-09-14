@@ -61,8 +61,8 @@ classes with their meaning; pre-select **read only**:
 > What may the assistant do in **Jira**?
 >
 > - [x] read — search and view issues; changes nothing
-> - [ ] write — create issues, comment, add a fix version; additive and reversible
-> - [ ] destructive — reassign, change the epic or parent, change summary and description, move issues between statuses
+> - [ ] write — create issues, comment, add a fix version, assign an issue, move issues between statuses; additive and reversible. A workflow move can be one-way and can fire notifications and automation
+> - [ ] destructive — change the parent, change summary and description
 
 > What may the assistant do in **Confluence**?
 >
@@ -94,7 +94,7 @@ about the other. A read list is enforced by the server on every read path — th
 allowlist is ANDed onto whatever JQL or CQL is sent, and a single issue or page
 is checked against the project or space it lives in *now*, not its key.
 
-An allowlist also covers the other end of a link: an `epic` or `parent` given
+An allowlist also covers the other end of a link: a `parent` given
 to `jira_update` must be in a listed project, and a `parent_id` given to
 `confluence_create_page` must be in the space the call names.
 
