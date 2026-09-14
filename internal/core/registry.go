@@ -18,6 +18,11 @@ const (
 	ActionWrite
 	// ActionDestructive overwrites or moves state that is hard to recover.
 	ActionDestructive
+	// ActionSelfUpdate replaces this server's own binary. It is its own class
+	// rather than a shade of destructive because it is gated by its own
+	// variable, ATLAS_SELFUPDATE, so that "may replace my own binary" is not
+	// reachable from any flag that grants "may reassign an issue".
+	ActionSelfUpdate
 )
 
 // String renders an Action for logs and errors.
@@ -29,6 +34,8 @@ func (a Action) String() string {
 		return "write"
 	case ActionDestructive:
 		return "destructive"
+	case ActionSelfUpdate:
+		return "selfupdate"
 	}
 	return "unknown"
 }
@@ -41,6 +48,8 @@ func (a Action) allowedBy(c Caps) bool {
 		return c.Write
 	case ActionDestructive:
 		return c.Destructive
+	case ActionSelfUpdate:
+		return c.SelfUpdate
 	}
 	return false
 }

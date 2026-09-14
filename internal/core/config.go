@@ -51,10 +51,15 @@ type Caps struct {
 	Read        bool
 	Write       bool
 	Destructive bool
+	// SelfUpdate permits replacing this server's own binary. Unlike the other
+	// three it comes from one global variable rather than a per-domain one —
+	// see selfUpdateVar in Load — so it holds the same value in every domain's
+	// Caps.
+	SelfUpdate bool
 }
 
 // Any reports whether the domain has any capability at all.
-func (c Caps) Any() bool { return c.Read || c.Write || c.Destructive }
+func (c Caps) Any() bool { return c.Read || c.Write || c.Destructive || c.SelfUpdate }
 
 // Config is the fully resolved server configuration.
 type Config struct {
@@ -131,6 +136,26 @@ func Load(getenv func(string) string, domains []string) (Config, error) {
 		return Config{}, fmt.Errorf("ATLAS_EPIC_FIELD_ID: %q is not a valid field id; expected a name such as customfield_10014", cfg.EpicFieldID)
 	}
 
+	// Read once, before the domain loop, and applied to every domain's Caps.
+	//
+	// Every other capability is spelled ATLAS_<DOMAIN>_<CLASS> because it is a
+	// per-product permission: reading Jira and reading Confluence are separate
+	// decisions. Replacing this server's binary is not. There is exactly one
+	// binary, so ATLAS_<DOMAIN>_SELFUPDATE would imply a per-product capability
+	// that does not exist, and an operator reading it would reasonably wonder
+	// what a Confluence-only self-update is. One global variable is also what
+	// keeps "may replace my own binary" unreachable from any flag that grants
+	// "may reassign an issue": it cannot be turned on as a side effect of
+	// widening a product's permissions.
+	//
+	// Parsed with the same parseBool as the rest, so a typo such as "ture" is
+	// an error naming the variable rather than a silent false.
+	const selfUpdateVar = "ATLAS_SELFUPDATE"
+	selfUpdate, err := parseBool(getenv(selfUpdateVar), false)
+	if err != nil {
+		return Config{}, fmt.Errorf("%s: %w", selfUpdateVar, err)
+	}
+
 	seen := make(map[string]struct{}, len(domains))
 	for _, d := range domains {
 		if !domainRe.MatchString(d) {
@@ -166,6 +191,9 @@ func Load(getenv func(string) string, domains []string) (Config, error) {
 			}
 			*flag.dst = v
 		}
+		// The one global capability, held in every domain's Caps so that
+		// Action.allowedBy stays a plain lookup on one struct.
+		caps.SelfUpdate = selfUpdate
 		cfg.Domains[d] = caps
 	}
 
@@ -204,7 +232,6 @@ func Load(getenv func(string) string, domains []string) (Config, error) {
 		*list.dst = keys
 	}
 
-	var err error
 	if cfg.LimitDefault, err = positiveInt(getenv("ATLAS_LIMIT_DEFAULT"), 20); err != nil {
 		return Config{}, fmt.Errorf("ATLAS_LIMIT_DEFAULT: %w", err)
 	}

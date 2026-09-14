@@ -68,12 +68,27 @@ var forbiddenPropertyNames = map[string]string{
 // a property called "source" whose description says "path to a local file".
 var pathPhrases = []string{"path to", "local file", "on disk", "file path", "absolute path"}
 
+// extraSurfaceModules holds modules that exist only in a tagged build. It is
+// empty in a default build; surface_selfupdate_test.go, which is itself behind
+// the tag, appends selfupdate.New() to it.
+//
+// The indirection exists because the two schema tests below must walk whatever
+// the binary actually advertises. A tagged build that added a tool the guard
+// never saw would be a tool with no guard at all, which is the one outcome the
+// build tag must not buy.
+var extraSurfaceModules []core.Module
+
+// surfaceModules is every module this binary can register, in either build.
+func surfaceModules() []core.Module {
+	return append([]core.Module{jira.New(), confluence.New()}, extraSurfaceModules...)
+}
+
 // TestNoToolAcceptsAPathOrAURL walks every tool of every module at full
 // capability, so a property that appears only when write or destructive is
 // enabled is checked too.
 func TestNoToolAcceptsAPathOrAURL(t *testing.T) {
 	all := core.Caps{Read: true, Write: true, Destructive: true}
-	for _, m := range []core.Module{jira.New(), confluence.New()} {
+	for _, m := range surfaceModules() {
 		for _, decl := range m.Tools() {
 			schema := decl.Schema(all)
 			if schema == nil {
@@ -110,7 +125,7 @@ func walkSchema(t *testing.T, tool, prefix string, s *jsonschema.Schema) {
 // is how upstream's icon_url reached a server-side fetch (CVE-2026-77245).
 func TestEveryToolSchemaIsClosed(t *testing.T) {
 	all := core.Caps{Read: true, Write: true, Destructive: true}
-	for _, m := range []core.Module{jira.New(), confluence.New()} {
+	for _, m := range surfaceModules() {
 		for _, decl := range m.Tools() {
 			schema := decl.Schema(all)
 			// A permissive {} is also non-nil and accepts everything, so the
@@ -189,6 +204,16 @@ func TestNoSourceFileOpensAFileOrListens(t *testing.T) {
 		if readErr != nil {
 			return readErr
 		}
+		// A file behind the selfupdate build tag is not part of the default
+		// binary, so it is outside the property this test states: the default
+		// build contains no forbidden call. The updater genuinely does write
+		// files — that is the feature — and exempting it here is only safe
+		// because TestSelfupdateCodeStaysBehindItsBuildTag below proves such a
+		// file cannot exist anywhere except the package the tag confines it to.
+		// The guarantee is therefore unchanged and now stated twice.
+		if declaresSelfupdateTag(body) {
+			return nil
+		}
 		for call, why := range forbiddenCalls {
 			if !strings.Contains(string(body), call) {
 				continue
@@ -222,5 +247,104 @@ func moduleRoot(t *testing.T) string {
 			t.Fatalf("go.mod not found above %s", dir)
 		}
 		dir = parent
+	}
+}
+
+// selfupdateTagDirs are the only two directories a file behind the selfupdate
+// build tag may live in: the updater package itself, and this command, which
+// holds the two-line hook that registers it.
+var selfupdateTagDirs = []string{
+	filepath.Join("internal", "selfupdate") + string(filepath.Separator),
+	filepath.Join("cmd", "atlassian-mcp-lite") + string(filepath.Separator),
+}
+
+// selfupdatePackageDir is the package every tagged file that is not the
+// registration hook must live in.
+var selfupdatePackageDir = filepath.Join("internal", "selfupdate") + string(filepath.Separator)
+
+// declaresSelfupdateTag reports whether a Go file is compiled only under the
+// selfupdate build tag.
+//
+// It reads the constraint as text rather than parsing it, for the same reason
+// the forbidden-call scan is a text scan: the property worth guarding is that
+// the line is there and a reviewer can grep for it. Only the lines above the
+// package clause are considered, because that is the only place a build
+// constraint takes effect — a "//go:build selfupdate" comment further down is a
+// comment, and treating it as a constraint would let a file exempt itself from
+// the scan above by mentioning the tag in prose.
+func declaresSelfupdateTag(body []byte) bool {
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "package ") {
+			return false
+		}
+		if strings.HasPrefix(line, "//go:build ") && strings.Contains(line, "selfupdate") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSelfupdateCodeStaysBehindItsBuildTag is the other half of the guarantee.
+//
+// The updater is the only code in this repository that writes to the
+// filesystem and the only code that makes an outbound request to a host other
+// than the configured Atlassian site. Both are acceptable only because a
+// default build does not contain them, and that in turn holds only if two
+// things are true: no tagged file lives outside the places the tag is meant to
+// reach, and no file inside the updater package is missing the tag. A single
+// untagged file in internal/selfupdate would compile the package — and its
+// imports — into the default binary.
+//
+// Unlike the scan above, this one includes _test.go files. A test file is still
+// a file in the package, and an untagged one would drag the package into a
+// default build's test binary, where it would fail the surface scan in the
+// confusing shape of an error about a file nobody expected to be compiled.
+func TestSelfupdateCodeStaysBehindItsBuildTag(t *testing.T) {
+	root := moduleRoot(t)
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "bin", "dist", "docs", "vendor":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		body, readErr := os.ReadFile(path) //nolint:gosec // the test walks its own repository
+		if readErr != nil {
+			return readErr
+		}
+		tagged := declaresSelfupdateTag(body)
+
+		if tagged {
+			allowed := false
+			for _, dir := range selfupdateTagDirs {
+				if strings.HasPrefix(rel, dir) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				t.Errorf("%s declares //go:build selfupdate but lives outside %v; updater code must stay in its own package", rel, selfupdateTagDirs)
+			}
+		}
+
+		if strings.HasPrefix(rel, selfupdatePackageDir) && !tagged {
+			t.Errorf("%s is in the updater package but declares no //go:build selfupdate constraint; one untagged file compiles the whole updater into the default binary", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
 	}
 }

@@ -156,6 +156,53 @@ The variable names are derived from the product names, so a future product
 `foo` would read `ATLAS_FOO_READ`, `ATLAS_FOO_WRITE` and `ATLAS_FOO_DESTRUCTIVE`
 with the same defaults.
 
+### Self-update
+
+| Variable | Default | Enables |
+|---|---|---|
+| `ATLAS_SELFUPDATE` | `false` | `self_update` — replaces this server's own binary with the latest signed release |
+
+Unlike every variable above, this one is not derived from a product name and is
+read **once, globally**: there is exactly one binary to replace, so a per-product
+spelling would describe a distinction that does not exist.
+
+This is the one capability that is not part of a normal install. It exists only
+in the **self-updating build variant**, the release asset named
+`atlassian-mcp-lite-selfupdate_<goos>_<goarch>` (`.exe` on Windows). The default
+binary and the container image are compiled without the updater at all: there is
+no updater code in them, no tool to enable, and setting this variable in such a
+deployment does nothing whatsoever. If you are not sure which binary you have,
+you have the default one unless you deliberately downloaded the `-selfupdate`
+asset.
+
+**What enabling it means.** `self_update` is a tool the model may call, and a
+model decides what to call from the text in front of it — including issue
+descriptions, comments and page bodies, which are written by anyone who can edit
+them on your site. So with this set to `true`, replacement of the server binary
+on your machine becomes an action reachable from third-party text. It overwrites
+the executable that holds your token at runtime, and it has an **action class of
+its own** for that reason — `self_update` is the only tool that declares it, and
+no product's `WRITE` or `DESTRUCTIVE` flag switches it on. "May replace my own
+binary" is not reachable from anything that grants "may reassign an issue".
+
+**What bounds it.** Two things, and they are the whole mitigation:
+
+- The tool does not exist unless you enable it. In the default build it is not
+  compiled; in the variant build with this variable unset or `false` it is not
+  registered, so it is absent from `tools/list` and unknown to the dispatcher.
+- The tool takes no arguments. Its input schema is closed and empty, so there is
+  nothing in the call for injected text to steer — no URL, no version, no path.
+  It fetches the latest release of this project, verifies its signature, and
+  either replaces the binary or reports that the running version is already
+  current.
+
+**The recommendation is to leave it off** and upgrade the way the rest of this
+page assumes: `docker pull` for the image, or download-and-verify for a binary.
+Turn it on only if you specifically want the server able to update itself, and
+prefer leaving it off on any machine whose Atlassian site has authors you do not
+control. `docs/install.md` covers getting the variant, verifying it, and the
+restart that a completed update requires.
+
 ### Read allowlists
 
 By default the read tools see every Jira project and every Confluence space the

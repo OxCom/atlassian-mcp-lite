@@ -130,6 +130,16 @@ Invoke-WebRequest "$Base/SHA256SUMS" -OutFile "$env:TEMP\SHA256SUMS"
 Select-String -Path "$env:TEMP\SHA256SUMS" -Pattern "windows_amd64"
 ```
 
+Each release carries these assets twice. The default set above cannot modify
+itself. A second, otherwise identical set named
+`atlassian-mcp-lite-selfupdate_<goos>_<goarch>` adds one tool, `self_update`,
+which replaces the binary with the latest release after checking an ed25519
+signature over that release's `SHA256SUMS` against a key compiled into it — off
+unless `ATLAS_SELFUPDATE=true`, and absent from the default binary
+and from the container image, which is upgraded with `docker pull`. Install the
+default set unless you want that; [`docs/install.md`](docs/install.md) covers the
+variant, its signature check and the restart an update needs.
+
 The binaries are unsigned. On macOS use `curl` rather than a browser, or clear
 the quarantine attribute with `xattr -d com.apple.quarantine`; on Windows
 SmartScreen may warn on first run. The checksum, not the absence of a warning,

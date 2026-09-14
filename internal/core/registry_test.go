@@ -292,3 +292,58 @@ func TestRegisterRejectsToolNameTakenByAnotherModule(t *testing.T) {
 		r.Register(fakeModule{domain: "confluence", tools: []ToolDecl{decl("shared", ActionRead)}})
 	})
 }
+
+// ActionSelfUpdate is gated by Caps.SelfUpdate alone. A tool declaring only
+// that class must stay absent while every other capability is on: the class
+// exists so that "may replace my own binary" cannot be reached from a flag that
+// grants "may reassign an issue".
+func TestSelfUpdateToolNeedsItsOwnCapability(t *testing.T) {
+	r := &Registry{}
+	r.Register(fakeModule{domain: "fake", tools: []ToolDecl{decl("fake_self_update", ActionSelfUpdate)}})
+
+	if got := r.Enabled(capsCfg(Caps{Read: true, Write: true, Destructive: true})); len(got) != 0 {
+		t.Errorf("read+write+destructive enabled a self-update tool: %v", got)
+	}
+
+	on := r.Enabled(capsCfg(Caps{SelfUpdate: true}))
+	if len(on) != 1 {
+		t.Fatalf("selfupdate on: got %d tools, want 1", len(on))
+	}
+	if on[0].Decl.Name != "fake_self_update" {
+		t.Errorf("enabled %q, want fake_self_update", on[0].Decl.Name)
+	}
+}
+
+// The reverse direction: Caps.SelfUpdate must not enable anything else. A
+// domain whose only capability is self-update offers no read, write or
+// destructive tool.
+func TestSelfUpdateCapabilityEnablesNoOtherClass(t *testing.T) {
+	r := &Registry{}
+	r.Register(fakeModule{domain: "fake", tools: []ToolDecl{
+		decl("fake_read", ActionRead),
+		decl("fake_write", ActionWrite),
+		decl("fake_nuke", ActionDestructive),
+	}})
+	if got := r.Enabled(capsCfg(Caps{SelfUpdate: true})); len(got) != 0 {
+		t.Errorf("enabled = %v, want nothing", got)
+	}
+}
+
+// Caps.Any gates the whole domain before any tool is considered, so a domain
+// holding only the self-update capability must not be skipped as empty.
+func TestCapsAnyCountsSelfUpdate(t *testing.T) {
+	if !(Caps{SelfUpdate: true}).Any() {
+		t.Error("a domain with only SelfUpdate reads as having no capability at all")
+	}
+	if (Caps{}).Any() {
+		t.Error("an empty Caps reads as having a capability")
+	}
+}
+
+// Action.String feeds logs and errors; an unnamed class would show as
+// "unknown" in the one line an operator reads to find out what was registered.
+func TestActionStringNamesSelfUpdate(t *testing.T) {
+	if got := ActionSelfUpdate.String(); got != "selfupdate" {
+		t.Errorf("ActionSelfUpdate.String() = %q, want selfupdate", got)
+	}
+}

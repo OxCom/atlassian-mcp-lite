@@ -309,6 +309,102 @@ The binary reads its configuration from the environment, so the MCP client must
 pass `ATLAS_ENV_FILE` — Step 6 does that. It opens no file other than that one
 and speaks MCP on stdin and stdout.
 
+### Option B, variant — the self-updating binary
+
+Every release carries two sets of binaries. The table above is the default set,
+which cannot modify itself. The second set is compiled with an updater built in:
+
+| | Default | Self-updating variant |
+|---|---|---|
+| Asset name | `atlassian-mcp-lite_<goos>_<goarch>` | `atlassian-mcp-lite-selfupdate_<goos>_<goarch>` |
+| Windows | `..._windows_amd64.exe` | `...-selfupdate_windows_amd64.exe` |
+| Extra tool | none | `self_update` |
+| How it is upgraded | download and verify a new asset | either that, or by calling `self_update` |
+
+Only the variant can update itself. The default binary contains no updater code
+at all, so there is nothing in it to enable. **The container image cannot
+self-update either**, by design: a swap inside a container is undone by the next
+redeploy. Images are upgraded with `docker pull`, as Option A describes.
+
+Ask one multi-select question, in the same style as the action classes in
+Step 2, and **do not pre-select it**:
+
+> This is the optional extra capability. Leave it unchecked unless you
+> specifically want it.
+>
+> - [ ] self-update — let the assistant replace this server's own binary with
+>       the latest signed release
+
+If the user leaves it unchecked — the recommended answer — install the default
+asset from the table above and skip the rest of this section.
+
+If the user checks it, say plainly what it means before installing anything: the
+assistant decides what to call from the text in front of it, which includes issue
+and page text written by anyone who can edit it on the site, so binary
+replacement becomes an action reachable from that text. What bounds it is that
+the tool is absent unless it is both this build and switched on, and that it
+takes no arguments at all — no URL, no version, no path — so there is nothing in
+the call for injected text to steer.
+
+Then install the variant asset and add one line to the config file:
+
+```bash
+ATLAS_SELFUPDATE=true
+```
+
+Unset or `false`, the tool is not registered and the variant behaves exactly
+like the default binary. `docs/configuration.md` covers the setting.
+
+**Verify the download against both files.** The variant release publishes
+`SHA256SUMS` and an `ed25519` detached signature `SHA256SUMS.sig` over it; check
+the signature first, then the checksum, because a checksum file nobody signed
+proves only that the download matches whatever was published:
+
+```bash
+VER=vX.Y.Z          # the release tag
+ASSET=atlassian-mcp-lite-selfupdate_linux_amd64      # variant, from the table above
+BASE=https://github.com/OxCom/atlassian-mcp-lite/releases/download/$VER
+
+curl -fLO "$BASE/$ASSET"
+curl -fLO "$BASE/SHA256SUMS"
+curl -fLO "$BASE/SHA256SUMS.sig"
+
+# Signature over the bytes of SHA256SUMS, checked with the project's release
+# public key. That key is not a download: it is the ed25519 public key carried
+# in the project's source, in internal/selfupdate/pubkey.go, which is the point
+# — a key fetched from the same place as the release would prove nothing. To
+# check by hand, wrap those raw 32 bytes in the DER header openssl expects:
+{ printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00'
+  echo 'aVWaPg3gb+dyQ2kUAmR2a470m0bG0CX/FcohYH6tnbw=' | base64 -d
+} | openssl pkey -pubin -inform DER -out release-pubkey.pem
+
+openssl pkeyutl -verify -pubin -inkey release-pubkey.pem \
+  -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
+
+sha256sum --ignore-missing -c SHA256SUMS   # macOS: shasum -a 256 --ignore-missing -c SHA256SUMS
+
+mkdir -p ~/.local/bin
+install -m 0755 "$ASSET" ~/.local/bin/atlassian-mcp-lite
+```
+
+The binary performs the same two checks on every update it makes: the signature
+over `SHA256SUMS` is verified with a public key compiled into it, then the
+downloaded asset is hashed and compared to the line for its own asset name. An
+update that fails either check is refused, and nothing on disk changes.
+
+**After a successful update, restart the server.** The tool stages the new
+binary and reports `restart_required`; it does not restart itself, because the
+MCP session is stateful and exiting would drop a session nobody asked to end.
+The running process keeps serving the old code until the MCP client launches it
+again. The previous binary is kept next to the new one as
+`<binary>.<version>.bak` — for example
+`~/.local/bin/atlassian-mcp-lite.v0.2.1.bak` — so a build that does not run on
+this machine can be put back by moving that file over the installed one. Delete
+it once the new version has proved itself.
+
+If the running version is already the latest, nothing is downloaded and the tool
+reports that it is current.
+
 ### Building from source instead
 
 Only needed to run an unreleased commit, or where both `ghcr.io` and the
@@ -540,6 +636,13 @@ Then match the message:
 config if it is pinned. **Upgrade — binary:** download the new asset, verify its
 checksum, and overwrite the installed file. Nothing else changes: the config
 file format is stable and is not touched by an upgrade.
+
+**Upgrade — self-updating variant:** the same download-and-verify path still
+works, and is the only path for the default binary and the image. With
+`ATLAS_SELFUPDATE=true` the assistant can instead call `self_update`,
+which verifies the release signature and checksum, stages the new binary, keeps
+the old one as `<binary>.<version>.bak`, and asks for a restart. The server runs
+the old code until the MCP client relaunches it.
 
 **Remove:** delete the server entry from the client config, delete the config
 file (it holds the token), then `docker rmi ghcr.io/oxcom/atlassian-mcp-lite`

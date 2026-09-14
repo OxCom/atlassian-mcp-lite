@@ -13,6 +13,14 @@ COMPOSE_FILES := $(foreach f,$(COMPOSE_SRC),-f $(f))
 
 DC := docker compose $(COMPOSE_FILES) run --rm --quiet-pull
 
+# Build-tag variant, e.g. `TAGS=selfupdate make check`. Exported rather than
+# passed per target: compose reads TAGS from this process's environment, and
+# exporting also carries it into the sub-makes that `security` and `check` run.
+# Unset means empty, which every service treats as "add no -tags flag", so the
+# default behaviour of every target is unchanged.
+TAGS ?=
+export TAGS
+
 .DEFAULT_GOAL := help
 
 .PHONY: help

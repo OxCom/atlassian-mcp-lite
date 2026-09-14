@@ -4,6 +4,14 @@
 #   docker compose -f compose.dev.yaml run --rm <service>
 #
 # The module cache is a named volume so repeated runs do not re-download.
+#
+# TAGS selects a build-tag variant: `TAGS=selfupdate make test` runs the same
+# checks over the code behind //go:build selfupdate, which is invisible to the
+# compiler — and therefore to test, vet, lint and gosec — unless it is asked
+# for. Empty TAGS (the default) adds no flag at all, so the untagged run is
+# byte-for-byte the command it always was. Each service re-lists the environment
+# it needs because a YAML merge key replaces the whole `environment` mapping
+# rather than adding to it.
 
 name: atlassian-mcp-lite-dev
 
@@ -53,12 +61,27 @@ services:
           GOOS=$${target%/*}
           GOARCH=$${target#*/}
           export GOOS GOARCH
-          out="atlassian-mcp-lite_$${GOOS}_$${GOARCH}"
-          if [ "$$GOOS" = windows ]; then out="$${out}.exe"; fi
-          echo "building $${out}"
-          go build -trimpath \
-            -ldflags="-s -w -X github.com/OxCom/atlassian-mcp-lite/internal/core.Version=$${VERSION}" \
-            -o "/src/dist/$${out}" ./cmd/atlassian-mcp-lite
+          # Two variants per target. The self-updater replaces the running
+          # binary with the asset matching its own name, so a selfupdate build
+          # must find a selfupdate build to download: shipping only the default
+          # asset would silently turn every update into a downgrade to a binary
+          # that can no longer update itself.
+          for variant in "" selfupdate; do
+            if [ -z "$$variant" ]; then
+              out="atlassian-mcp-lite_$${GOOS}_$${GOARCH}"
+              tagflag=""
+            else
+              out="atlassian-mcp-lite-$${variant}_$${GOOS}_$${GOARCH}"
+              tagflag="-tags $${variant}"
+            fi
+            if [ "$$GOOS" = windows ]; then out="$${out}.exe"; fi
+            echo "building $${out}"
+            # $$tagflag is deliberately unquoted: empty must expand to no
+            # argument at all, not to an empty one.
+            go build -trimpath $$tagflag \
+              -ldflags="-s -w -X github.com/OxCom/atlassian-mcp-lite/internal/core.Version=$${VERSION}" \
+              -o "/src/dist/$${out}" ./cmd/atlassian-mcp-lite
+          done
         done
         cd /src/dist
         sha256sum ./* > SHA256SUMS
@@ -72,7 +95,14 @@ services:
     environment:
       CGO_ENABLED: "1"
       GOFLAGS: -buildvcs=false
-    command: go test ./... -race -covermode=atomic -coverprofile=coverage.out
+      TAGS: ${TAGS:-}
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        if [ -n "$$TAGS" ]; then set -- -tags "$$TAGS"; fi
+        exec go test ./... -race -covermode=atomic -coverprofile=coverage.out "$$@"
 
   cover:
     <<: *go
@@ -80,7 +110,17 @@ services:
 
   vet:
     <<: *go
-    command: go vet ./...
+    environment:
+      CGO_ENABLED: "0"
+      GOFLAGS: -buildvcs=false
+      TAGS: ${TAGS:-}
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        if [ -n "$$TAGS" ]; then set -- -tags "$$TAGS"; fi
+        exec go vet "$$@" ./...
 
   tidy:
     <<: *go
@@ -94,7 +134,15 @@ services:
       - .:/src
       - gomod:/go/pkg/mod
       - golangci:/root/.cache/golangci-lint
-    command: golangci-lint run --timeout 5m
+    environment:
+      TAGS: ${TAGS:-}
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        if [ -n "$$TAGS" ]; then set -- --build-tags "$$TAGS"; fi
+        exec golangci-lint run --timeout 5m "$$@"
 
   fmt:
     image: golangci/golangci-lint:v2.13.2@sha256:ba07dffad130794ae79ebaa0056809d18c0168f3f846480ffd3eb6c04578b83d
@@ -109,7 +157,18 @@ services:
   # code. Covers both the module graph and our own call paths.
   govulncheck:
     <<: *go
-    command: sh -c "go install golang.org/x/vuln/cmd/govulncheck@v1.7.0 && govulncheck ./..."
+    environment:
+      CGO_ENABLED: "0"
+      GOFLAGS: -buildvcs=false
+      TAGS: ${TAGS:-}
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+        if [ -n "$$TAGS" ]; then set -- -tags "$$TAGS"; fi
+        exec govulncheck "$$@" ./...
 
   # Static analysis of our own code. Installed with go install rather than run
   # from securego/gosec: that image lags the releases badly (2.24.6 in
@@ -117,7 +176,18 @@ services:
   # image, module cache and TLS trust configuration as every other Go tool.
   gosec:
     <<: *go
-    command: sh -c "go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0 && gosec -severity medium -confidence medium ./..."
+    environment:
+      CGO_ENABLED: "0"
+      GOFLAGS: -buildvcs=false
+      TAGS: ${TAGS:-}
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+        if [ -n "$$TAGS" ]; then set -- -tags "$$TAGS"; fi
+        exec gosec -severity medium -confidence medium "$$@" ./...
 
 
   # Secret scanning: committed files and full git history.

@@ -38,6 +38,9 @@ func run() error {
 	// are derived from the domain name, so core needs no change.
 	reg.Register(jira.New())
 	reg.Register(confluence.New())
+	// Modules that exist only in a tagged build. In a default build this is a
+	// call to an empty function, and internal/selfupdate is not even imported.
+	registerExtraDeclarations(reg)
 
 	// ATLAS_ENV_FILE names the private config file. It is refused unless only
 	// its owner can read it: the file holds an API token that carries the full
@@ -83,6 +86,10 @@ func run() error {
 	reg = &core.Registry{}
 	reg.Register(jira.NewWith(cfg, client))
 	reg.Register(confluence.NewWith(cfg, client))
+	// The same optional modules, now wired. They get the logger rather than the
+	// Atlassian client: nothing outside the product modules may hold that
+	// credential.
+	registerExtraModules(reg, log)
 
 	srv, n, err := core.NewServer(cfg, reg, log)
 	if err != nil {

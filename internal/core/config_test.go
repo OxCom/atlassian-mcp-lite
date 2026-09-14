@@ -555,3 +555,77 @@ func TestLoadRejectsShortToken(t *testing.T) {
 		t.Errorf("16 multi-byte characters must be accepted: %v", err)
 	}
 }
+
+// ATLAS_SELFUPDATE is the one capability variable that is not derived from a
+// domain name: there is exactly one binary to replace, so a per-domain spelling
+// would name a capability that does not exist. Load reads it once and puts the
+// same value in every domain's Caps.
+func TestLoadReadsSelfUpdateGloballyAndDefaultsItOff(t *testing.T) {
+	load := func(raw string) (Config, error) {
+		return Load(env(map[string]string{
+			"ATLAS_BASE_URL":   "https://x.atlassian.net",
+			"ATLAS_EMAIL":      "a@b.c",
+			"ATLAS_TOKEN":      fixtureToken,
+			"ATLAS_SELFUPDATE": raw,
+		}), []string{"jira", "confluence"})
+	}
+
+	// Unset means off. Replacing the running binary is the one capability that
+	// must never arrive by default.
+	cfg, err := load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, d := range []string{"jira", "confluence"} {
+		if cfg.Domains[d].SelfUpdate {
+			t.Errorf("%s: SelfUpdate is on with ATLAS_SELFUPDATE unset", d)
+		}
+	}
+
+	cfg, err = load("true")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, d := range []string{"jira", "confluence"} {
+		if !cfg.Domains[d].SelfUpdate {
+			t.Errorf("%s: ATLAS_SELFUPDATE=true did not reach Caps", d)
+		}
+	}
+}
+
+// The per-domain spelling must not work: reading ATLAS_JIRA_SELFUPDATE would
+// mean the capability could be granted alongside a product's permissions.
+func TestLoadIgnoresAPerDomainSelfUpdateSpelling(t *testing.T) {
+	cfg, err := Load(env(map[string]string{
+		"ATLAS_BASE_URL":        "https://x.atlassian.net",
+		"ATLAS_EMAIL":           "a@b.c",
+		"ATLAS_TOKEN":           fixtureToken,
+		"ATLAS_JIRA_SELFUPDATE": "true",
+	}), []string{"jira"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Domains["jira"].SelfUpdate {
+		t.Error("ATLAS_JIRA_SELFUPDATE granted the self-update capability")
+	}
+}
+
+// A typo must not read as false here either, and the error has to name the
+// variable the operator has to go and fix.
+func TestLoadRejectsAnUnparsableSelfUpdateValue(t *testing.T) {
+	for _, raw := range []string{"ture", "yep", "2", "-1", "true false"} {
+		_, err := Load(env(map[string]string{
+			"ATLAS_BASE_URL":   "https://x.atlassian.net",
+			"ATLAS_EMAIL":      "a@b.c",
+			"ATLAS_TOKEN":      fixtureToken,
+			"ATLAS_SELFUPDATE": raw,
+		}), []string{"jira"})
+		if err == nil {
+			t.Errorf("ATLAS_SELFUPDATE=%q must be rejected, not silently false", raw)
+			continue
+		}
+		if !strings.Contains(err.Error(), "ATLAS_SELFUPDATE") {
+			t.Errorf("ATLAS_SELFUPDATE=%q: err = %v, want the variable named", raw, err)
+		}
+	}
+}
