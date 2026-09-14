@@ -357,7 +357,15 @@ jobs:
       - name: checksums
         run: |
           cd dist
-          sha256sum ./* > SHA256SUMS
+          # Bare names, not "./name". sha256sum echoes back whatever the glob
+          # handed it, and the self-updater looks its own asset up by the name
+          # it was built as. v0.0.4 shipped a manifest of "./…" entries, which
+          # every installed binary then failed to find in a manifest whose
+          # signature had just verified. Newer binaries tolerate both
+          # spellings; publishing the bare one is what lets a v0.0.4 install
+          # update itself instead of needing a manual reinstall. `sha256sum -c`
+          # reads either form.
+          sha256sum * > SHA256SUMS
           cat SHA256SUMS
       # ed25519 detached signature over the bytes of SHA256SUMS. A self-update
       # build verifies it with a public key compiled into the binary, so an

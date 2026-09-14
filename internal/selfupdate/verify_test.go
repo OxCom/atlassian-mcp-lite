@@ -132,6 +132,44 @@ func TestHashForFindsThisBuildsLineAndNothingElse(t *testing.T) {
 	}
 }
 
+// TestHashForAcceptsTheSpellingsSha256sumEmits is a regression test for the
+// defect that made the first signed release unusable: the release job runs
+// `sha256sum ./*`, so every published line names "./atlassian-mcp-lite_…",
+// while the lookup stripped only the "*" binary marker. The signature verified,
+// the manifest was genuine, and the update was refused with "no entry for" its
+// own asset — the fixtures here all used the bare spelling, so nothing caught
+// it until a real release existed.
+func TestHashForAcceptsTheSpellingsSha256sumEmits(t *testing.T) {
+	name := "atlassian-mcp-lite-selfupdate_linux_amd64"
+	content := []byte("binary")
+	want := strings.Fields(sumsLine(name, content))[0]
+
+	for _, spelling := range []string{name, "./" + name, "*" + name, "*./" + name} {
+		manifest := want + "  " + spelling + "\n"
+		got, err := hashFor([]byte(manifest), name)
+		if err != nil {
+			t.Errorf("%q: hashFor: %v", spelling, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%q: hash = %q, want %q", spelling, got, want)
+		}
+	}
+
+	// Only those two prefixes are stripped. An entry for a file in another
+	// directory is a different file and must not answer for ours.
+	if _, err := hashFor([]byte(want+"  other/"+name+"\n"), name); !errors.Is(err, errVerification) {
+		t.Errorf("a path-qualified entry matched; err = %v", err)
+	}
+
+	// Two spellings of one name still say two things about the same file, so
+	// the duplicate refusal must survive the normalisation.
+	both := want + "  " + name + "\n" + want + "  ./" + name + "\n"
+	if _, err := hashFor([]byte(both), name); !errors.Is(err, errVerification) {
+		t.Errorf("duplicate spellings accepted; err = %v", err)
+	}
+}
+
 func TestHashForRefusesAMissingEntry(t *testing.T) {
 	manifest := sumsLine("atlassian-mcp-lite_linux_amd64", []byte("default build"))
 	_, err := hashFor([]byte(manifest), "atlassian-mcp-lite-selfupdate_linux_amd64")

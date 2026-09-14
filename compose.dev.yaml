@@ -84,7 +84,9 @@ services:
           done
         done
         cd /src/dist
-        sha256sum ./* > SHA256SUMS
+        # Bare names, matching the release job: the self-updater looks its
+        # asset up by name, and a "./" prefix makes every lookup miss.
+        sha256sum * > SHA256SUMS
         cat SHA256SUMS
 
   # -race is the default now that the image has a C toolchain. CGO is enabled

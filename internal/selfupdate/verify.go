@@ -79,6 +79,13 @@ func verifySums(sums, sig []byte) error {
 // whitespace, an optional "*" binary marker, then the file name. Names in this
 // project never contain a space, so splitting on whitespace is exact rather
 // than approximate.
+//
+// The name is normalised by manifestName before it is compared, because
+// sha256sum echoes back whatever the shell handed it: the release job runs
+// `sha256sum ./*`, so every published line reads "./atlassian-mcp-lite_…".
+// Comparing the raw field found no entry for any asset and refused every
+// update with a message about the release — see manifestName for why matching
+// the spelling loosely is safe here.
 func hashFor(sums []byte, name string) (string, error) {
 	found := ""
 	for _, line := range strings.Split(string(sums), "\n") {
@@ -94,7 +101,7 @@ func hashFor(sums []byte, name string) (string, error) {
 			// match our name.
 			continue
 		}
-		if strings.TrimPrefix(fields[1], "*") != name {
+		if manifestName(fields[1]) != name {
 			continue
 		}
 		if found != "" {
@@ -115,6 +122,23 @@ func hashFor(sums []byte, name string) (string, error) {
 		return "", fmt.Errorf("%w: the checksum manifest entry for %s is not hexadecimal", errVerification, name)
 	}
 	return found, nil
+}
+
+// manifestName strips the two prefixes sha256sum may put in front of a name:
+// the "*" it writes in binary mode, and the "./" it copies from the argument
+// it was given.
+//
+// Loosening the comparison is safe because this runs on a manifest whose
+// signature has already been checked against the key compiled into this
+// binary. The names in it were written by this project's own release job, not
+// by a caller, so the question here is not "may this entry be trusted" — the
+// signature settled that — but only "which spelling of our own asset name did
+// sha256sum happen to emit". Nothing beyond these two fixed prefixes is
+// stripped, and a path segment is not: "other/atlassian-mcp-lite_linux_amd64"
+// still does not match, so an entry for a different file cannot answer for
+// ours.
+func manifestName(field string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(field, "*"), "./")
 }
 
 // checkAsset hashes the downloaded bytes and compares them to the verified
