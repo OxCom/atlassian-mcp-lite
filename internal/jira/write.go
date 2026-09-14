@@ -256,3 +256,138 @@ func (m module) authorizeWrite(ctx context.Context, key string) error {
 	}
 	return nil
 }
+
+// maxIssueTypeLen bounds the issue-type name. It is a free-form string a
+// caller controls, so it is bounded for the same reason every other one here
+// is: nothing unbounded reaches the wire.
+const maxIssueTypeLen = 64
+
+func (m module) createDecl() core.ToolDecl {
+	return core.ToolDecl{
+		Name: "jira_create",
+		// Write, not destructive: creating an issue makes a new object and
+		// overwrites nothing, the same class as confluence_create_page. With
+		// one class there is nothing for the schema to branch on, so the
+		// capability argument is ignored.
+		Actions:     []core.Action{core.ActionWrite},
+		Description: "Create a Jira issue. The description is written in markdown." + descNotAuthorized,
+		Schema: func(core.Caps) *jsonschema.Schema {
+			return core.ObjectSchema(map[string]*jsonschema.Schema{
+				fieldProject:     {Type: typeString, Description: "Project key, e.g. PROJ."},
+				fieldIssueType:   {Type: typeString, Description: "Issue type name, e.g. Task or Bug."},
+				fieldSummary:     {Type: typeString, Description: "One-line issue title. Plain text."},
+				fieldDescription: {Type: typeString, Description: "Optional issue description. Markdown."},
+			}, []string{fieldProject, fieldIssueType, fieldSummary})
+		},
+		Handle: m.handleCreate,
+	}
+}
+
+type createArgs struct {
+	Project     string `json:"project"`
+	IssueType   string `json:"issuetype"`
+	Summary     string `json:"summary"`
+	Description string `json:"description"`
+}
+
+func (m module) handleCreate(ctx context.Context, raw json.RawMessage) (any, error) {
+	if m.client == nil {
+		return nil, fmt.Errorf("jira_create: module has no client; construct it with NewWith")
+	}
+	var in createArgs
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, fmt.Errorf("jira_create: %w", err)
+	}
+	// The registry already withholds a tool whose class is disabled, and the
+	// SDK validates arguments against the schema — but the handler is where the
+	// write actually happens, so it re-checks rather than trusting its caller.
+	if !m.cfg.Domains[Domain].Write {
+		return nil, fmt.Errorf("jira_create: creating an issue requires the write capability for %s", Domain)
+	}
+	// Every bound measures the value as it arrived, before any trim. Trimming
+	// first would measure only what survives it, so a megabyte of spaces with a
+	// short word on the end would pass every cap here. The siblings bound the
+	// raw field for the same reason.
+	//
+	// Jira states the summary limit in characters, so that one is measured in
+	// characters; the rest are bounded in bytes.
+	if err := core.BoundRunes(fieldSummary, in.Summary, maxSummaryLen); err != nil {
+		return nil, fmt.Errorf("jira_create: %w", err)
+	}
+	for _, c := range []struct {
+		field string
+		value string
+		limit int
+	}{
+		// maxKeyLen is the limit validKey applies to the issue key this is the
+		// prefix of. It is applied before the pattern below, which accepts a key
+		// of any length: without it a megabyte of "A" satisfies the pattern,
+		// reaches the request body, and is echoed back whole by the refusal.
+		{fieldProject, in.Project, maxKeyLen},
+		{fieldIssueType, in.IssueType, maxIssueTypeLen},
+		{fieldDescription, in.Description, maxBodyLen},
+	} {
+		if err := core.BoundBytes(c.field, c.value, c.limit); err != nil {
+			return nil, fmt.Errorf("jira_create: %w", err)
+		}
+	}
+
+	project := strings.TrimSpace(in.Project)
+	issueType := strings.TrimSpace(in.IssueType)
+	summary := strings.TrimSpace(in.Summary)
+	if project == "" || issueType == "" || summary == "" {
+		return nil, fmt.Errorf("jira_create: project, issuetype and summary are all required")
+	}
+	// A value that could never name a Jira project is refused here rather than
+	// being sent, so the allowlist below compares against something that has
+	// the shape of a project key at all.
+	if !reProjectKey.MatchString(project) {
+		return nil, fmt.Errorf("jira_create: invalid project key %q", project)
+	}
+	// Upper-cased as validKey does. AllowProject folds case, so a lowercase key
+	// the allowlist permits must not then be sent in a form Jira may not
+	// resolve — the allowlist would have accepted a write that then failed.
+	project = strings.ToUpper(project)
+
+	// Checked against the caller's own key before anything leaves the process.
+	// The message names only that key: nothing has been read out of Jira yet,
+	// and nothing that is read later belongs in this refusal.
+	if !m.cfg.AllowProject(project) {
+		return nil, fmt.Errorf("jira_create: writes to project %s are not permitted by ATLAS_WRITE_PROJECTS", project)
+	}
+
+	// summary and issuetype are sent exactly as the caller wrote them. Jira
+	// renders both literally, so escaping them here would store backslashes in
+	// Jira rather than protect anything — markup.SafeText belongs on the read
+	// direction, where the text is third-party data.
+	fields := map[string]any{
+		fieldProject: map[string]any{fieldKey: project},
+		"issuetype":  map[string]any{"name": issueType},
+		fieldSummary: summary,
+	}
+	if in.Description != "" {
+		// Markdown that is syntax only renders to nothing. Creating the issue
+		// anyway would silently drop the description the caller asked for, and
+		// that cannot be told apart from a bug.
+		wiki := markup.ToWiki(in.Description)
+		if wiki == "" {
+			return nil, fmt.Errorf("jira_create: description renders to nothing; supply text, not markup alone")
+		}
+		// v2 accepts wiki markup as a plain string; v3 would demand ADF.
+		fields[fieldDescription] = wiki
+	}
+
+	var res struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	// No createmeta round trip: an unknown issue type, or a project the token
+	// cannot create in, comes back as Jira's own 4xx, which the client already
+	// bounds before it reaches an error message.
+	if err := m.client.Do(ctx, http.MethodPost, "/rest/api/2/issue", nil, map[string]any{fieldsParam: fields}, &res); err != nil {
+		return nil, err
+	}
+	// The key comes back from Jira, so it leaves through the same scalar
+	// treatment as every name a read tool returns.
+	return map[string]any{fieldKey: markup.SafeText(res.Key), "id": res.ID}, nil
+}

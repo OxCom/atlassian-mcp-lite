@@ -1,7 +1,7 @@
 # Atlassian MCP lite
 
 A small [Model Context Protocol](https://modelcontextprotocol.io) server for
-Jira Cloud and Confluence Cloud, written in Go. Ten tools, five per product.
+Jira Cloud and Confluence Cloud, written in Go. Eleven tools: six Jira, five Confluence.
 It speaks **stdio only**: the MCP protocol travels on stdout, and all logging
 goes to stderr.
 
@@ -16,10 +16,10 @@ every parameter it exposes is something a prompt-injected page can try to fill
 in. A Jira integration needs a handful of operations, not a mirror of the REST
 API. This server is built around that:
 
-- **Only what you turn on exists.** Ten tools cover search, read, comment,
-  update, transition and page management. Each one belongs to a product and an
-  action class (read, write, destructive), and a class you leave off is not
-  filtered at call time — the tool is absent from `tools/list`, and a
+- **Only what you turn on exists.** Eleven tools cover search, read, create,
+  comment, update, transition and page management. Each one belongs to a
+  product and an action class (read, write, destructive), and a class you
+  leave off is not filtered at call time — the tool is absent from `tools/list`, and a
   parameter such as `summary` on `jira_update` is missing from the schema
   itself. A fresh install serves four read tools and nothing that can change
   your site.
@@ -204,6 +204,7 @@ off, the server refuses to start rather than serving an empty tool list.
 
 | Tool | Action class | What it does |
 |---|---|---|
+| `jira_create` | write | Create an issue in a project |
 | `jira_search` | read | JQL search, compact default field set |
 | `jira_get` | read | One issue, description as markdown |
 | `jira_update` | write + destructive | Adds a fix version with write; replaces assignee, epic, parent, summary or description only when destructive is enabled |

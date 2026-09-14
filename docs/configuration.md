@@ -121,7 +121,7 @@ destructive are off.
 | Variable | Default | Enables |
 |---|---|---|
 | `ATLAS_JIRA_READ` | `true` | `jira_search`, `jira_get` |
-| `ATLAS_JIRA_WRITE` | `false` | `jira_comment`; `jira_update` for `fixVersion` only |
+| `ATLAS_JIRA_WRITE` | `false` | `jira_create`, `jira_comment`; `jira_update` for `fixVersion` only |
 | `ATLAS_JIRA_DESTRUCTIVE` | `false` | `jira_transition`; `jira_update` for assignee, epic, parent, summary and description |
 | `ATLAS_CONFLUENCE_READ` | `true` | `confluence_search`, `confluence_get_page` |
 | `ATLAS_CONFLUENCE_WRITE` | `false` | `confluence_create_page`, `confluence_comment` |
@@ -260,7 +260,9 @@ account can reach. These narrow that.
 
 A non-empty list is strict. A write or destructive call aimed at anything not
 listed is refused before any request is made, and `jira_update` also refuses to
-move an issue into or out of an unlisted project. Matching is case-insensitive.
+move an issue into or out of an unlisted project. `jira_create` names its
+project directly, so the list is checked against that key and no lookup is
+needed. Matching is case-insensitive.
 Reads follow `ATLAS_READ_PROJECTS` / `ATLAS_READ_SPACES` instead, independently.
 A value that is set but yields no keys, such as `,`, is a startup error rather
 than "allow everything".

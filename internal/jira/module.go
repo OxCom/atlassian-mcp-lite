@@ -24,6 +24,9 @@ const (
 	// it is a plain scalar rather than markup, and it goes through
 	// markup.SafeText rather than through a converter.
 	fieldSummary = "summary"
+	// fieldIssueType is the issue-type property name, in the schema and in the
+	// request body alike.
+	fieldIssueType = "issuetype"
 	// fieldKey is the issue-key property name, in schemas, request bodies and
 	// results alike.
 	fieldKey = "key"
@@ -91,6 +94,7 @@ func (m module) Tools() []core.ToolDecl {
 		m.updateDecl(),
 		m.transitionDecl(),
 		m.commentDecl(),
+		m.createDecl(),
 	}
 }
 

@@ -70,6 +70,9 @@ func TestModuleDeclaresExpectedToolsAndActions(t *testing.T) {
 		"jira_update":     {core.ActionWrite, core.ActionDestructive},
 		"jira_transition": {core.ActionDestructive},
 		"jira_comment":    {core.ActionWrite},
+		// Creating makes a new object and overwrites nothing, so it is write
+		// only; see createDecl.
+		"jira_create": {core.ActionWrite},
 	}
 	got := map[string][]core.Action{}
 	for _, d := range m.Tools() {

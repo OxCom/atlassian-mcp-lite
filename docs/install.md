@@ -61,7 +61,7 @@ classes with their meaning; pre-select **read only**:
 > What may the assistant do in **Jira**?
 >
 > - [x] read — search and view issues; changes nothing
-> - [ ] write — comment and add a fix version; additive and reversible
+> - [ ] write — create issues, comment, add a fix version; additive and reversible
 > - [ ] destructive — reassign, change the epic or parent, change summary and description, move issues between statuses
 
 > What may the assistant do in **Confluence**?

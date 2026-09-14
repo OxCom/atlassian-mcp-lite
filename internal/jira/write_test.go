@@ -418,6 +418,7 @@ func TestWriteHandlersGuardAgainstNilClient(t *testing.T) {
 	for name, args := range map[string]map[string]any{
 		"jira_comment":    {"key": "PROJ-1", "body": "hi"},
 		"jira_transition": {"key": "PROJ-1", "status": "Done"},
+		"jira_create":     {"project": "PROJ", "issuetype": "Task", "summary": "s"},
 	} {
 		err := callErr(t, m, name, args)
 		if !strings.Contains(err.Error(), "NewWith") {
@@ -458,6 +459,7 @@ func TestWriteToolsPropagateUpstreamErrors(t *testing.T) {
 	}{
 		{"comment", "jira_comment", map[string]any{"key": "PROJ-1", "body": "hi"}, http.MethodPost},
 		{"transition", "jira_transition", map[string]any{"key": "PROJ-1", "status": "Done"}, http.MethodPost},
+		{"create", "jira_create", map[string]any{"project": "PROJ", "issuetype": "Task", "summary": "s"}, http.MethodPost},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var reached bool
@@ -526,5 +528,265 @@ func TestTransitionErrorsQuoteNames(t *testing.T) {
 	err := callErr(t, m, "jira_transition", map[string]any{"key": "PROJ-1", "status": "Nope"})
 	if !strings.Contains(err.Error(), `"Done" -> "Closed" (id 51)`) {
 		t.Errorf("error = %v, want the transition rendered with quoted names", err)
+	}
+}
+
+func TestCreateSendsProjectIssueTypeSummaryAndWikiDescription(t *testing.T) {
+	var body map[string]any
+	m := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/rest/api/2/issue" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = io.WriteString(w, `{"id":"10001","key":"PROJ-7"}`)
+	})
+
+	out, _ := call(t, m, "jira_create", map[string]any{
+		"project": "PROJ", "issuetype": "Task", "summary": "Fix the thing",
+		"description": "See `x` and **y**",
+	}).(map[string]any)
+
+	fields, _ := body["fields"].(map[string]any)
+	project, _ := fields["project"].(map[string]any)
+	if project["key"] != "PROJ" {
+		t.Errorf("fields.project.key = %v, want PROJ", project["key"])
+	}
+	issuetype, _ := fields["issuetype"].(map[string]any)
+	if issuetype["name"] != "Task" {
+		t.Errorf("fields.issuetype.name = %v, want Task", issuetype["name"])
+	}
+	if fields["summary"] != "Fix the thing" {
+		t.Errorf("fields.summary = %v", fields["summary"])
+	}
+	desc, _ := fields["description"].(string)
+	if !strings.Contains(desc, "{{x}}") || !strings.Contains(desc, "*y*") {
+		t.Errorf("description not converted to wiki markup: %q", desc)
+	}
+	if out["key"] != "PROJ-7" || out["id"] != "10001" {
+		t.Errorf("result = %v, want the key and id the server returned", out)
+	}
+}
+
+func TestCreateOmitsDescriptionWhenNotSupplied(t *testing.T) {
+	var body map[string]any
+	m := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = io.WriteString(w, `{"id":"1","key":"PROJ-1"}`)
+	})
+
+	call(t, m, "jira_create", map[string]any{"project": "PROJ", "issuetype": "Bug", "summary": "s"})
+
+	fields, _ := body["fields"].(map[string]any)
+	if _, ok := fields["description"]; ok {
+		t.Errorf("description must be absent when the caller supplied none, got %v", fields["description"])
+	}
+}
+
+func TestCreateRequiresWriteCapability(t *testing.T) {
+	base := newTestModule(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("no request may be made when the write class is disabled")
+	}).(module)
+	base.cfg.Domains = map[string]core.Caps{Domain: {Read: true}}
+
+	if err := callErr(t, base, "jira_create", map[string]any{
+		"project": "PROJ", "issuetype": "Task", "summary": "s",
+	}); err == nil {
+		t.Error("creating without the write capability must be refused")
+	}
+}
+
+func TestCreateRefusedByAllowlist(t *testing.T) {
+	base := newTestModule(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("refusal must happen before any request")
+	}).(module)
+	base.cfg.WriteProjects = []string{"OTHER"}
+
+	err := callErr(t, base, "jira_create", map[string]any{
+		"project": "PROJ", "issuetype": "Task", "summary": "s",
+	})
+	if !strings.Contains(err.Error(), "PROJ") {
+		t.Errorf("error = %v, want it to name the project the caller supplied", err)
+	}
+	if strings.Contains(err.Error(), "OTHER") {
+		t.Errorf("error = %v, must not disclose the allowlist's contents", err)
+	}
+}
+
+func TestCreateProceedsForAnAllowlistedProject(t *testing.T) {
+	base := newTestModule(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"1","key":"PROJ-1"}`)
+	}).(module)
+	base.cfg.WriteProjects = []string{"PROJ"}
+
+	raw, _ := json.Marshal(map[string]any{"project": "PROJ", "issuetype": "Task", "summary": "s"})
+	if _, err := declFor(t, base, "jira_create").Handle(context.Background(), raw); err != nil {
+		t.Fatalf("jira_create: %v", err)
+	}
+}
+
+func TestCreateRejectsInvalidProjectKey(t *testing.T) {
+	m := newTestModule(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("no request should be made for an invalid project key")
+	})
+	for name, project := range map[string]string{
+		"personal space": "~PERSONAL",
+		"leading digit":  "1ABC",
+		"empty":          "",
+		"whitespace":     "   ",
+		"punctuation":    "PR-OJ",
+	} {
+		if err := callErr(t, m, "jira_create", map[string]any{
+			"project": project, "issuetype": "Task", "summary": "s",
+		}); err == nil {
+			t.Errorf("%s: an invalid project key must be refused", name)
+		}
+	}
+}
+
+func TestCreateRequiresIssueTypeAndSummary(t *testing.T) {
+	m := newTestModule(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("no request should be made when a required field is blank")
+	})
+	for name, args := range map[string]map[string]any{
+		"missing issuetype": {"project": "PROJ", "summary": "s"},
+		"blank issuetype":   {"project": "PROJ", "issuetype": "  ", "summary": "s"},
+		"missing summary":   {"project": "PROJ", "issuetype": "Task"},
+		"blank summary":     {"project": "PROJ", "issuetype": "Task", "summary": " "},
+	} {
+		if err := callErr(t, m, "jira_create", args); err == nil {
+			t.Errorf("%s: must be refused", name)
+		}
+	}
+}
+
+func TestCreateBoundsSummaryAndDescription(t *testing.T) {
+	m := newTestModule(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("no request should be made for an over-long field")
+	})
+	for name, args := range map[string]map[string]any{
+		"summary": {"project": "PROJ", "issuetype": "Task",
+			"summary": strings.Repeat("s", maxSummaryLen+1)},
+		"description": {"project": "PROJ", "issuetype": "Task", "summary": "s",
+			"description": strings.Repeat("d", maxBodyLen+1)},
+		"issuetype": {"project": "PROJ", "summary": "s",
+			"issuetype": strings.Repeat("t", maxIssueTypeLen+1)},
+		// Trimming before measuring would let any of these through: the value
+		// that arrives is unbounded whatever survives the trim.
+		"padded summary": {"project": "PROJ", "issuetype": "Task",
+			"summary": strings.Repeat(" ", maxSummaryLen+1) + "s"},
+		"padded issuetype": {"project": "PROJ", "summary": "s",
+			"issuetype": strings.Repeat(" ", maxIssueTypeLen+1) + "Task"},
+		"padded description": {"project": "PROJ", "issuetype": "Task", "summary": "s",
+			"description": strings.Repeat(" ", maxBodyLen+1) + "d"},
+	} {
+		if err := callErr(t, m, "jira_create", args); err == nil {
+			t.Errorf("%s: an unbounded value must be refused", name)
+		}
+	}
+}
+
+// reProjectKey accepts a key of any length, so the bound is what keeps a
+// megabyte of "A" out of the request body and out of the refusal that echoes
+// the caller's own value back.
+func TestCreateBoundsProjectKey(t *testing.T) {
+	m := newTestModule(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("no request should be made for an over-long project key")
+	})
+	oversize := strings.Repeat("A", maxKeyLen+1)
+	for name, project := range map[string]string{
+		"valid shape":   oversize,
+		"invalid shape": oversize + "!",
+		"padded":        strings.Repeat(" ", maxKeyLen+1) + "PROJ",
+	} {
+		err := callErr(t, m, "jira_create", map[string]any{
+			"project": project, "issuetype": "Task", "summary": "s",
+		})
+		if err == nil {
+			t.Fatalf("%s: an unbounded project key must be refused", name)
+		}
+		if strings.Contains(err.Error(), oversize) {
+			t.Errorf("%s: the refusal repeats the whole over-long value back", name)
+		}
+	}
+}
+
+// The allowlist folds case, so a lowercase key it permits must not then reach
+// Jira in a form Jira may not resolve. validKey upper-cases for the same
+// reason.
+func TestCreateUpperCasesProjectKey(t *testing.T) {
+	var sent string
+	base := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Fields struct {
+				Project struct {
+					Key string `json:"key"`
+				} `json:"project"`
+			} `json:"fields"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		sent = body.Fields.Project.Key
+		_, _ = io.WriteString(w, `{"id":"1","key":"PROJ-1"}`)
+	}).(module)
+	base.cfg.WriteProjects = []string{"PROJ"}
+
+	call(t, base, "jira_create", map[string]any{
+		"project": "proj", "issuetype": "Task", "summary": "s",
+	})
+	if sent != "PROJ" {
+		t.Errorf("project key sent = %q, want %q", sent, "PROJ")
+	}
+}
+
+// A whitespace-only description passes the non-empty check and renders to
+// nothing; creating the issue anyway would silently drop the description the
+// caller asked for.
+func TestCreateRefusesDescriptionThatRendersToNothing(t *testing.T) {
+	m := newTestModule(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("no request should be made for a description that renders empty")
+	})
+	if err := callErr(t, m, "jira_create", map[string]any{
+		"project": "PROJ", "issuetype": "Task", "summary": "s",
+		"description": "   \n  ",
+	}); err == nil {
+		t.Error("a description that renders to nothing must be refused")
+	}
+}
+
+// summary is plain text Jira renders literally, so it is sent exactly as the
+// caller wrote it. Escaping it on the write direction would store backslashes
+// in Jira, which is why markup.SafeText belongs on the read direction only.
+func TestCreateSendsSummaryUnescaped(t *testing.T) {
+	const summary = "[link](http://x) and `code`"
+	var body map[string]any
+	m := newTestModule(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = io.WriteString(w, `{"id":"1","key":"PROJ-1"}`)
+	})
+
+	call(t, m, "jira_create", map[string]any{
+		"project": "PROJ", "issuetype": "Task", "summary": summary,
+	})
+
+	fields, _ := body["fields"].(map[string]any)
+	if fields["summary"] != summary {
+		t.Errorf("fields.summary = %q, want the caller's text verbatim", fields["summary"])
+	}
+}
+
+func TestCreateScrubsReturnedKey(t *testing.T) {
+	m := newTestModule(t, func(w http.ResponseWriter, _ *http.Request) {
+		// U+200B between the key's halves: the key is third-party text like
+		// any other scalar a result carries.
+		_, _ = io.WriteString(w, "{\"id\":\"1\",\"key\":\"PROJ-\u200b1\"}")
+	})
+
+	out, _ := call(t, m, "jira_create", map[string]any{
+		"project": "PROJ", "issuetype": "Task", "summary": "s",
+	}).(map[string]any)
+
+	if out["key"] != "PROJ-1" {
+		t.Errorf("key = %q, want the invisible character stripped", out["key"])
 	}
 }
