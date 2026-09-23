@@ -201,7 +201,7 @@ services:
     command: detect --source=/src --redact --verbose
 
   trufflehog:
-    image: trufflesecurity/trufflehog:3.97.4@sha256:562bc231afa9de3d04de44cfe624252b08207de1fc3cebc5e7ed92bed7f279e4
+    image: trufflesecurity/trufflehog:3.97.5@sha256:1cec88f18ca39e26e04e61fe9d886c9c4e5f2fc0ba4f2ed185cac0722bd8a076
     working_dir: /src
     volumes:
       - .:/src
