@@ -229,7 +229,7 @@ jobs:
           go test ./... -race -covermode=atomic -coverprofile=coverage.out "$@"
       - name: coverage summary
         run: go tool cover -func=coverage.out
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # One name per matrix leg: two legs uploading the same artifact name
           # is an error, and the two coverage profiles are not the same run.
@@ -295,7 +295,7 @@ jobs:
               -ldflags="-s -w -X github.com/OxCom/atlassian-mcp-lite/internal/core.Version=${GITHUB_REF_NAME}" \
               -o "dist/${out}" ./cmd/atlassian-mcp-lite
           done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
