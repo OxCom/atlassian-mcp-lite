@@ -205,7 +205,7 @@ func copyFile(src, dst string) error {
 
 	// O_EXCL, so this cannot silently overwrite a backup the operator is
 	// relying on. The mode matches the binary it copies.
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, stagedFileMode) // #nosec G304 -- dst is os.Executable plus a validated tag, never caller input
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, stagedFileMode) // #nosec G302 G304 -- dst is os.Executable plus a validated tag, never caller input; 0755 because the backup must stay runnable for a rollback
 	if err != nil {
 		return err
 	}
