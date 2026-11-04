@@ -5,7 +5,7 @@
 # it the final stage's COPY --from=golang:1.27-trixie is a second, independent
 # resolution, and a tag that moved mid-build would put the toolchain and the
 # runtime trust roots in different images.
-FROM golang:1.27-trixie@sha256:80a86f24490f252511a683a1e1ee4c915b4a96e1f5519530f9ba1fdc9862b7c5 AS base
+FROM golang:1.27-trixie@sha256:c65ecfe613b539ac74c62a4c3b2c27e8f8a6076384c8f27e8a3c0f3be17cc385 AS base
 
 # Build the static binary.
 FROM base AS build
